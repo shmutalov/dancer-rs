@@ -806,6 +806,15 @@ early, which reads as the dancer stumbling.
 - Presentation replaces the whole window surface, so there is no `WM_PAINT` and
   winit's redraw path goes unused. The loop is: build a premultiplied BGRA DIB,
   call `UpdateLayeredWindow`.
+- **`UpdateLayeredWindow` carries pixels only — never geometry.** It can reposition
+  the window through its `pptDst` argument, which is tempting because it makes a
+  drag one call instead of two. Doing so moves the window without winit knowing,
+  and winit owns and caches window geometry: after enough fast drags its view
+  diverges from reality and mouse input stops being delivered to the window at all.
+  Move with `Window::set_outer_position` and pass `NULL` for `pptDst`. Found in M0;
+  the symptom is bizarre (window visible, enabled, correctly styled, hit-testable,
+  event loop alive, yet no mouse events — not even synthetic ones) and gives no
+  hint of its cause.
 - `image` for PNG decode; pre-slice cells into an `Arc<[RgbaImage]>` at load,
   **premultiplied** — the present path requires it, so per-frame conversion is
   pure waste.

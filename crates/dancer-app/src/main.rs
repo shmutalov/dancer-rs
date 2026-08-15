@@ -10,7 +10,10 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
-use dancer_render::{apply_window_styles, hwnd_of, present, surface_size, Surface};
+use dancer_render::{
+    apply_window_styles, capture_owner, hwnd_of, present, primary_button_down, reassert_topmost,
+    surface_size, Surface,
+};
 use dancer_sprite::Sheet;
 use winit::application::ApplicationHandler;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
@@ -28,7 +31,9 @@ fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "dancer=info,dancer_app=info,dancer_sprite=info".into()),
+                // The binary target is `dancer-rs`, so its crate name is
+                // `dancer_rs` — not `dancer_app`, which matches nothing.
+                .unwrap_or_else(|_| "dancer_rs=info,dancer_render=info,dancer_sprite=info".into()),
         )
         .with_target(false)
         .init();
@@ -150,6 +155,19 @@ impl App {
         }
     }
 
+    /// Move the window through winit, so winit's cached geometry stays correct.
+    ///
+    /// `UpdateLayeredWindow` could do this in the same call that presents pixels,
+    /// but moving the window behind winit's back desyncs it and mouse input
+    /// eventually stops being delivered.
+    fn move_to(&mut self, pos: (i32, i32)) {
+        self.pos = pos;
+        if let Some(window) = self.window.as_ref() {
+            window.set_outer_position(PhysicalPosition::new(pos.0, pos.1));
+        }
+        self.draw();
+    }
+
     fn draw(&mut self) {
         let (Some(hwnd), Some(surface)) = (self.hwnd, self.surface.as_mut()) else {
             return;
@@ -174,14 +192,24 @@ impl App {
             self.cfg.sprite.mirror,
         );
 
-        if let Err(e) = present(hwnd, surface, self.pos, self.cfg.sprite.opacity) {
+        if let Err(e) = present(hwnd, surface, self.cfg.sprite.opacity) {
             tracing::error!(error = %e, "present failed");
         }
     }
 
     fn begin_drag(&mut self) {
+        if self.drag.is_some() {
+            return;
+        }
         let Some(cursor) = cursor_pos() else { return };
         self.drag = Some((cursor.0 - self.pos.0, cursor.1 - self.pos.1));
+        tracing::debug!(
+            cursor = ?cursor,
+            pos = ?self.pos,
+            capture = ?self.hwnd.map(capture_owner),
+            "drag begin"
+        );
+
         // Switch to the Held row, bypassing anything else. This is the one
         // interaction that must feel immediate (spec §12).
         if let Some(held) = self.sheet.held_row {
@@ -192,10 +220,23 @@ impl App {
     }
 
     fn end_drag(&mut self) {
-        self.drag = None;
+        if self.drag.take().is_none() {
+            return;
+        }
         if let Some(prev) = self.row_before_drag.take() {
             self.row = prev;
+            self.cell = 0;
         }
+        if let Some(hwnd) = self.hwnd {
+            // Clicking never raises a WS_EX_NOACTIVATE window, so z-order lost
+            // during the drag would otherwise never come back.
+            reassert_topmost(hwnd);
+        }
+        tracing::debug!(
+            pos = ?self.pos,
+            capture = ?self.hwnd.map(capture_owner),
+            "drag end"
+        );
     }
 }
 
@@ -242,9 +283,10 @@ impl ApplicationHandler for App {
         self.pos = self.initial_position(el, (w, h));
         self.surface = Surface::new(w, h).ok();
         self.hwnd = Some(hwnd);
+        window.set_outer_position(PhysicalPosition::new(self.pos.0, self.pos.1));
+        self.window = Some(window);
 
         self.draw();
-        self.window = Some(window);
 
         tracing::info!(
             w, h,
@@ -268,18 +310,28 @@ impl ApplicationHandler for App {
                 let _ = self.cfg.save(&self.dir);
                 el.exit();
             }
-            WindowEvent::MouseInput { state, button, .. } => match (button, state) {
+            WindowEvent::MouseInput { state, button, .. } => {
+                tracing::debug!(
+                    ?button,
+                    ?state,
+                    dragging = self.drag.is_some(),
+                    capture = ?self.hwnd.map(capture_owner),
+                    "mouse"
+                );
+                match (button, state) {
                 (MouseButton::Left, ElementState::Pressed) => self.begin_drag(),
                 (MouseButton::Left, ElementState::Released) => self.end_drag(),
                 // M0 has no tray yet, and WS_EX_NOACTIVATE means no keyboard —
                 // so right-click is the only way out. Replaced by the tray in M5.
                 (MouseButton::Right, ElementState::Pressed) => {
+                    self.end_drag();
                     self.store_position(el);
                     let _ = self.cfg.save(&self.dir);
                     el.exit();
                 }
                 _ => {}
-            },
+                }
+            }
             _ => {}
         }
     }
@@ -287,11 +339,17 @@ impl ApplicationHandler for App {
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
         // While dragging, track the cursor in screen coordinates. Window-relative
         // events are useless here because the window moves with the pointer.
+        if self.drag.is_some() && !primary_button_down() {
+            // Belt and braces: capture should make a lost release impossible, but
+            // a wedged drag leaves the window glued to the cursor, which is bad
+            // enough to detect directly rather than trusting the event stream.
+            tracing::debug!("button released without a Released event; ending drag");
+            self.end_drag();
+        }
         if let (Some(off), Some(cursor)) = (self.drag, cursor_pos()) {
             let want = (cursor.0 - off.0, cursor.1 - off.1);
             if want != self.pos {
-                self.pos = want;
-                self.draw();
+                self.move_to(want);
             }
         }
 

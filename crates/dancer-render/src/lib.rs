@@ -14,6 +14,9 @@ use winit::window::Window;
 
 use windows::Win32::Foundation::{COLORREF, HWND, POINT, SIZE};
 use windows::Win32::Graphics::Gdi::*;
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetAsyncKeyState, GetCapture, VK_LBUTTON, VK_RBUTTON,
+};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 pub mod surface;
@@ -69,28 +72,87 @@ pub fn is_click_through(hwnd: HWND) -> bool {
     unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_TRANSPARENT.0 != 0 }
 }
 
-/// Present a premultiplied BGRA buffer as the entire window surface.
+/// Which window currently holds the mouse capture, if any.
 ///
-/// `pos` is the top-left in **physical screen pixels**; `UpdateLayeredWindow`
-/// moves the window as part of the same call, which is why dragging feels
-/// immediate — there is no separate `SetWindowPos` to race against.
+/// Diagnostic. If some window holds capture, every mouse message goes there
+/// regardless of what is under the cursor — which is exactly the shape of "I can
+/// see the dancer but clicking it does nothing, until I activate another window".
+///
+/// Note we deliberately do **not** call `SetCapture` ourselves: winit's Win32
+/// backend already maintains a `capture_count`, captures on button-down and
+/// releases at zero, and zeroes that count on `WM_CAPTURECHANGED` — which our own
+/// `SetCapture` would trigger, corrupting its bookkeeping.
+pub fn capture_owner(hwnd: HWND) -> CaptureOwner {
+    let owner = unsafe { GetCapture() };
+    if owner.0.is_null() {
+        CaptureOwner::None
+    } else if owner == hwnd {
+        CaptureOwner::Us
+    } else {
+        CaptureOwner::Other(owner.0 as usize)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureOwner {
+    None,
+    Us,
+    Other(usize),
+}
+
+/// Is the primary mouse button physically down right now?
+///
+/// Used as a self-healing check: capture should make a lost release impossible,
+/// but a wedged drag is bad enough — the window follows the cursor forever — that
+/// it is worth detecting directly rather than trusting the event stream.
+///
+/// Honours the left/right swap, since `VK_LBUTTON` is the physical button rather
+/// than the primary one.
+pub fn primary_button_down() -> bool {
+    unsafe {
+        let vk = if GetSystemMetrics(SM_SWAPBUTTON) != 0 {
+            VK_RBUTTON
+        } else {
+            VK_LBUTTON
+        };
+        GetAsyncKeyState(vk.0 as i32) as u16 & 0x8000 != 0
+    }
+}
+
+/// Re-assert always-on-top without activating.
+///
+/// `WS_EX_NOACTIVATE` means clicking never raises us, so z-order can be lost to
+/// another topmost window and never regained.
+pub fn reassert_topmost(hwnd: HWND) {
+    unsafe {
+        let _ = SetWindowPos(
+            hwnd,
+            Some(HWND_TOPMOST),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
+    }
+}
+
+/// Present a premultiplied BGRA buffer as the window surface.
+///
+/// **Pixels only — this does not move the window.** `UpdateLayeredWindow` can
+/// reposition via its `pptDst` argument, and doing so is tempting because it
+/// makes a drag one call instead of two. It is also a trap: winit owns window
+/// geometry and caches it, so moving the window underneath leaves winit's view of
+/// the world wrong, and mouse input routing stops working after enough fast
+/// drags. Move with `Window::set_outer_position` and let this call carry pixels.
 ///
 /// `opacity` is applied by the compositor via `SourceConstantAlpha`, so a global
 /// fade costs no pixel work. This is where spec §13's `[sprite] opacity` lands;
 /// FAOSDance pays for the same effect with a full `AlphaComposite` pass.
-pub fn present(
-    hwnd: HWND,
-    surface: &Surface,
-    pos: (i32, i32),
-    opacity: f32,
-) -> Result<(), RenderError> {
+pub fn present(hwnd: HWND, surface: &Surface, opacity: f32) -> Result<(), RenderError> {
     unsafe {
         let screen_dc = GetDC(None);
         let mut src = POINT { x: 0, y: 0 };
-        let mut dst = POINT {
-            x: pos.0,
-            y: pos.1,
-        };
         let mut size = SIZE {
             cx: surface.width() as i32,
             cy: surface.height() as i32,
@@ -105,7 +167,8 @@ pub fn present(
         let r = UpdateLayeredWindow(
             hwnd,
             Some(screen_dc),
-            Some(&mut dst),
+            // NULL pptDst = leave the window where winit put it.
+            None,
             Some(&mut size),
             Some(surface.dc()),
             Some(&mut src),
