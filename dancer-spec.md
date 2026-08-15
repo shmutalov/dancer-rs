@@ -381,12 +381,21 @@ Subscribe to `MediaPropertiesChanged`, `PlaybackInfoChanged` and
 `SourceAppUserModelId` against a configurable allowlist so a notification sound or
 a background video doesn't hijack the dancer.
 
+**That allowlist cannot be a hardcoded list of English executable names.** Measured
+2026-08-15: Yandex Music desktop identifies as `Яндекс Музыка.exe` — the AUMID is a
+localised, non-ASCII string that varies with the installer's language. Compare as
+Unicode, and build the allowlist from sessions actually observed, offered in the
+tray, rather than shipping a fixed table that silently excludes anyone not running
+an English install.
+
 **Caveats to handle:**
 - **`Position` is only refreshed on state change, not continuously.** Use
   `LastUpdatedTime` as the anchor timestamp, never `Instant::now()` at read time.
-  Measured 2026-08-15: Edge reported `0.019s` for a track 59.7 s in — stale by a
-  full minute on a two-minute track. This is not a rounding concern; without the
-  anchor, SMTC position data is unusable.
+  Measured 2026-08-15 in two unrelated applications: Edge reported `0.019s` for a
+  track 59.7 s in, and Yandex Music desktop reported `43.172s` while 130 s in —
+  stale by 87 s, growing to 120 s on a later sample with `Position` unchanged. This
+  is not a rounding concern and not one app's bug; without the anchor, SMTC position
+  data is unusable.
 - Some sessions publish no timeline at all. Detect and drop to `Unscored`; there is
   no audio fallback (§7).
 - **Some players publish nothing at all.** Measured 2026-08-15: Yandex Browser
@@ -395,6 +404,8 @@ a background video doesn't hijack the dancer.
   dancer never learns anything is playing and sits `Idle`, not `Unscored`. This is
   what justifies the Yandex adapter (§6.4), and it needs a compatibility sweep
   before M4 exits: Chrome, Firefox, Opera, Spotify desktop, AIMP, foobar2000, VLC.
+  The blind spot is per-*application*, not per-service: the Yandex Music **desktop**
+  app publishes normally on the same machine (§6.4).
 - **Track identity is `(title, artist)`, never a file path.** Normalise (trim,
   casefold, strip `- Remastered` style suffixes) and look the result up in the
   `library` table (§5.1), keyed on a hash of the raw strings. Encoding-level
@@ -465,9 +476,15 @@ was weak: precision only matters in `Locked`, and streamed tracks are permanentl
 Browser publishes *nothing* to SMTC, so the choice is presence versus nothing, not
 fine position versus coarse. Without it the dancer cannot tell a track is playing.
 
-Still to settle at M6: whether the Yandex *desktop app* publishes to SMTC even
-though the browser does not. If it does, most users are served by the desktop app
-and `yamuse` narrows to covering the web player.
+**Settled 2026-08-15: the desktop app publishes to SMTC normally.** Title, artist,
+`PlaybackStatus`, timeline and a live `LastUpdatedTime`, identifying as
+`Яндекс Музыка.exe`. The blind spot is Yandex *Browser*, not Yandex Music.
+
+This shrinks `yamuse` to the web-player case, and weakens the presence argument that
+justified choosing it — a Yandex user who installs the desktop app is fully served
+by §6.2 with no dependency, no auth flow and no undocumented API. Keep `yamuse`
+feature-flagged and reassess at M6 whether it earns its place at all; "install the
+desktop app" is a legitimate answer that costs nothing to maintain.
 
 **Do not reach the download endpoints.** Several Yandex wrappers expose lossless
 track downloads — fetch the file, analyse it, get a perfect grid.
@@ -1001,7 +1018,8 @@ plumbing to feed it.
    product; streaming is `Unscored`.
 5. Rust edition and MSRV. §1 says 2021 / 1.75+, written before this dependency set;
    edition 2024 (Rust 1.85+) is likely the better default. Settle before `cargo new`.
-6. ~~Does Yandex need ynison push-position?~~ **Resolved: `yamuse` chosen.** The
-   live question is now whether Yandex support beyond SMTC is worth building at
-   all, since streaming is permanently `Unscored` and precise position buys nothing
-   visible. Revisit at M6. See §6.4.
+6. ~~Does Yandex need ynison push-position?~~ **Resolved: `yamuse` chosen**, and
+   then largely undercut on 2026-08-15 — the Yandex Music desktop app publishes to
+   SMTC normally, so only browser playback is invisible. Streaming is permanently
+   `Unscored` and precise position buys nothing visible. The live question at M6 is
+   whether to build the adapter at all. See §6.4.

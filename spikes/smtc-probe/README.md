@@ -45,7 +45,7 @@ This is spec §6.2's warning made concrete: anchor on `LastUpdatedTime`, never
 dancer a full minute out on a two-minute track. The `BeatClock` anchor design
 (§9) is not an optimisation — without it SMTC data is unusable.
 
-### 2. Yandex Browser does not publish to SMTC
+### 2. Yandex Browser does not publish to SMTC — but the desktop app does
 
 With Yandex Music actively playing in Yandex Browser, `GetSessions()` returned
 **zero** — repeatedly, unpaused, no error. Edge on the same machine returns a
@@ -62,6 +62,47 @@ what turns `yamuse` from a precision upgrade into a presence one.
 Not tested: Chrome, Firefox, Opera, AIMP, foobar2000, VLC, Spotify desktop. Worth a
 compatibility sweep before M4 exits, since "which players publish" determines how
 much of M4's value is real.
+
+## Re-run — 2026-08-15, Yandex Music **desktop** app
+
+Same machine, Yandex Music desktop installed and playing. It publishes normally:
+
+```
+sessions: 1
+[current] Яндекс Музыка.exe
+  title  : "Trance-Atlantic"
+  artist : "Scooter"
+  status : Ok(4)  rate 1.0
+  position: 43.172s / 470.692s  (as reported)
+  anchor  : LastUpdatedTime is 86.967s old
+  EXTRAPOLATED position = 130.139s
+```
+
+**This resolves the M6 open question** (spec §6.4, ROADMAP §5.8): the blind spot is
+Yandex *Browser*, not Yandex Music as a service. `yamuse` therefore narrows to
+covering the web player only, and the honest advice for a Yandex user is "install
+the desktop app" — which costs the project nothing.
+
+Two further results from the re-run:
+
+**The staleness is not an Edge quirk.** A second, unrelated application shows the
+same behaviour at larger magnitude — 87 s stale on first read. Spec §6.2 now rests
+on two independent applications rather than one browser.
+
+**Extrapolation tracks wall clock exactly.** Sampled again 33 s later: reported
+`Position` still frozen at `43.172s`, anchor aged 86.967 → 120.153 s (Δ 33.186 s),
+extrapolated 130.139 → 163.325 s (Δ 33.186 s). The anchor does not drift against
+wall clock while playback continues uninterrupted, which is the property `BeatClock`
+depends on.
+
+Caveat on that: it proves the arithmetic is self-consistent, not that the
+extrapolated value equals true playback position. Confirming *that* needs a known
+seek point, which belongs in M1's fixtures rather than here.
+
+**New constraint for M4: `SourceAppUserModelId` is not ASCII.** This session
+identifies as `Яндекс Музыка.exe` — a localised executable name. Spec §6.2's
+allowlist cannot be a hardcoded English string, must compare as Unicode, and should
+be populated from observed sessions in the tray rather than shipped as a fixed list.
 
 ### 3. Titles vary by source — which argues *against* normalising
 

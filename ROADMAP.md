@@ -207,6 +207,13 @@ OS-level cause found — no policy keys, default browser flags, media features
 present. For a user on such a player the dancer never learns anything is playing:
 `Idle`, not `Unscored`. This changes the `yamuse` calculus (§5.8).
 
+**Re-run the same day with the Yandex Music *desktop* app: it publishes normally.**
+So the blind spot is the browser, not the service. Staleness reproduced at 87 s in
+this second, unrelated application, and the extrapolation was shown to track wall
+clock exactly across a 33 s gap. New M4 constraint: `SourceAppUserModelId` came back
+as `Яндекс Музыка.exe`, so the allowlist must handle non-ASCII, locale-dependent
+identifiers. Details in the probe README; consequences for `yamuse` in §5.8.
+
 **Titles vary wildly across sources** — the first track tested came back as title
 `"Blur - Song 2 (Official Music Video)"`, artist `"Blur"`. The initial reading was
 that this demands aggressive normalisation. That was wrong: canonicalising content
@@ -532,9 +539,21 @@ Two things still to carry into M6:
   binary down.
 - It ships the download endpoints §5.9 fences off, so the structural guard matters.
 
-Open question for M6: whether the Yandex *desktop app* publishes to SMTC even
-though the browser does not. If it does, the cheap answer for most users is "use
-the desktop app", and `yamuse` narrows to covering the web player.
+**That open question closed the same day, against `yamuse`.** The Yandex Music
+desktop app publishes to SMTC normally — full metadata, timeline and a live anchor.
+The blind spot is Yandex *Browser* specifically.
+
+So the presence argument now covers only users who play in the browser and will not
+install the desktop app. That is a real set, but a much smaller one than "Yandex
+users", and the alternative costs us nothing: no dependency, no auth flow, no
+undocumented API, no download endpoints to fence off (§5.9). `yamuse` stays
+feature-flagged and unbuilt; M6 should ask whether it earns its place at all rather
+than assuming it does.
+
+Worth noting the reasoning here has now swung twice on evidence — weak (precision),
+then strong (presence), then weak again (presence, but only in the browser). The
+decision was never wrong to defer; it was right to keep it feature-flagged and
+unbuilt until M6, which is exactly why this costs nothing to revise.
 
 ### 5.9 A capability to fence off
 
@@ -573,7 +592,8 @@ Carried forward, with the resolved ones struck.
    cache is one file, so copying it to a friend happens to work — a consequence of
    the storage choice, not a feature. Streamed tracks stay `Unscored` (§4.2).
 5. **New:** Rust edition and MSRV. See §0.3.
-6. ~~Does Yandex need ynison push-position?~~ **Resolved: `yamuse` chosen.** But
-   see §5.8 — with streaming permanently `Unscored`, precise position buys nothing
-   visible, so the open question became whether Yandex integration beyond SMTC is
-   worth building at all. Revisit at M6.
+6. ~~Does Yandex need ynison push-position?~~ **Resolved: `yamuse` chosen**, then
+   substantially undercut on 2026-08-15 when the Yandex Music desktop app turned out
+   to publish to SMTC normally. Streaming is permanently `Unscored`, so precise
+   position buys nothing visible, and presence is now only missing in the *browser*.
+   The live question at M6 is whether to build the Yandex adapter at all. See §5.8.
