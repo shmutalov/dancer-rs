@@ -111,7 +111,12 @@ pub fn resolve(
 /// — either the track was analysed earlier and the `library` table remembers where
 /// it lives, or the dancer stays `Unscored`. This is the join that makes owned
 /// music work through the user's own player, and it is the point of M4.
-pub fn spawn_lookup(db: Option<PathBuf>, meta: TrackMeta, tx: Sender<AppEvent>) {
+pub fn spawn_lookup(
+    db: Option<PathBuf>,
+    meta: TrackMeta,
+    fallback: Option<StreamFallback>,
+    tx: Sender<AppEvent>,
+) {
     let spawned = std::thread::Builder::new()
         .name("library-lookup".into())
         .spawn(move || {
@@ -123,6 +128,19 @@ pub fn spawn_lookup(db: Option<PathBuf>, meta: TrackMeta, tx: Sender<AppEvent>) 
                     return;
                 }
             };
+
+            // The streamed-track key, checked before reaching for the network:
+            // a track fetched once is never fetched again.
+            if let Some(fb) = fallback.as_ref() {
+                if let Ok(Some(score)) = store.get_score(&fb.cache_key(&meta)) {
+                    tracing::info!(title = %meta.title, "streamed track already analysed");
+                    let _ = tx.send(AppEvent::ScoreReady {
+                        id: meta.id,
+                        score: Arc::new(score),
+                    });
+                    return;
+                }
+            }
 
             match store.lookup(&meta) {
                 Ok(Some(score)) => {
@@ -146,14 +164,111 @@ pub fn spawn_lookup(db: Option<PathBuf>, meta: TrackMeta, tx: Sender<AppEvent>) 
                     tracing::info!(
                         title = %meta.title,
                         artist = %meta.artist,
-                        "no score in the library; staying Unscored"
+                        "no score in the library"
                     );
+                    // Nothing owned matches. The streamed path is the last resort
+                    // and only runs if the user turned it on.
+                    match fallback {
+                        Some(fb) => fb.run(&store, &meta, &tx),
+                        None => tracing::info!("staying Unscored"),
+                    }
                 }
                 Err(e) => tracing::warn!(error = %e, "library lookup failed"),
             }
         });
     if let Err(e) = spawned {
         tracing::error!(error = %e, "could not start the lookup thread");
+    }
+}
+
+/// Building a grid for a track that exists only as a stream (spec §6.4).
+///
+/// Split behind a struct so the SMTC path reads the same whether or not the
+/// feature is compiled in, and so the "only when explicitly enabled" condition
+/// lives in exactly one place.
+#[derive(Clone)]
+pub struct StreamFallback {
+    #[cfg(feature = "yandex")]
+    pub token: String,
+    // Unread without the feature, and kept anyway so the type is identical in both
+    // builds — the SMTC path should not be shaped by whether this is compiled in.
+    #[cfg_attr(not(feature = "yandex"), allow(dead_code))]
+    pub models: PathBuf,
+    #[cfg_attr(not(feature = "yandex"), allow(dead_code))]
+    pub scratch: PathBuf,
+}
+
+impl StreamFallback {
+    /// Cache key for a streamed track, namespaced away from local files.
+    ///
+    /// Keyed on the reported strings rather than a Yandex id, because the id is
+    /// not known until after a search — and the whole point is to avoid searching
+    /// twice for the same song.
+    pub fn cache_key(&self, meta: &TrackMeta) -> String {
+        format!("stream:{:016x}", meta.library_key())
+    }
+
+    #[cfg(feature = "yandex")]
+    fn run(&self, store: &Store, meta: &TrackMeta, tx: &Sender<AppEvent>) {
+        use dancer_yandex::Yandex;
+
+        tracing::info!(
+            title = %meta.title,
+            artist = %meta.artist,
+            "fetching this track to analyse it; the audio is deleted afterwards"
+        );
+
+        let yandex = match Yandex::new(&self.token, self.scratch.clone()) {
+            Ok(y) => y,
+            Err(e) => {
+                tracing::warn!(error = %e, "yandex unavailable; staying Unscored");
+                return;
+            }
+        };
+        let mut analyzer = match Analyzer::new(&self.models) {
+            Ok(a) => a,
+            Err(e) => {
+                tracing::warn!(error = %e, "no analyzer; staying Unscored");
+                return;
+            }
+        };
+
+        // A single-threaded runtime, built here and dropped here: this is the only
+        // async code in the app and it should not impose a runtime on anything else.
+        let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, "no runtime; staying Unscored");
+                return;
+            }
+        };
+
+        let mut score = match runtime.block_on(yandex.score_for(meta, &mut analyzer)) {
+            Ok(s) => s,
+            Err(e) => {
+                // Every failure here is a degradation, never a crash: no match, no
+                // network, a changed API. The dancer keeps dancing.
+                tracing::info!(error = %e, "could not build a grid; staying Unscored");
+                return;
+            }
+        };
+
+        // Re-key onto the reported strings so the next play is a cache hit without
+        // another search.
+        score.track_id = self.cache_key(meta);
+        if let Err(e) = store.put_score(&score) {
+            tracing::warn!(error = %e, "caching the streamed grid failed");
+        }
+
+        let _ = tx.send(AppEvent::ScoreReady {
+            id: meta.id.clone(),
+            score: Arc::new(score),
+        });
+    }
+
+    #[cfg(not(feature = "yandex"))]
+    fn run(&self, _store: &Store, _meta: &TrackMeta, _tx: &Sender<AppEvent>) {
+        tracing::info!("built without the yandex feature; staying Unscored");
     }
 }
 

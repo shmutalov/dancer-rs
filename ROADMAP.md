@@ -735,6 +735,25 @@ reach download endpoints, rather than relying on nobody reaching for them. The
 there is no sanctioned alternative: streamed tracks stay `Unscored`. That is the
 decision, not a gap awaiting a workaround.
 
+#### Reversed 2026-08-15 — see spec §6.4.1
+
+The owner overruled this, and the argument that carried it was the one this section
+had underweighted: **the gap is not at the edges, it is the whole product for a
+streaming user.** `Unscored` means every part of M1 through M3 sits idle — the
+feature does not exist for them. "That is the decision, not a gap awaiting a
+workaround" was true about the mechanism and wrong about the size of what it cost.
+
+The reasoning above still governs the *shape*, and the shape is what makes the
+owner's line — the app can fetch, the user initiates, nothing is redistributed —
+structural rather than a claim: fetch, analyse, **delete**; retain a grid, not
+audio; take the **lowest** bitrate offered because the grid cannot tell the
+difference; one track at a time, never a batch; off unless a token is supplied.
+Spec §6.4.1 has the full list and the reasoning for each.
+
+The guard also moved rather than vanished: `dancer-source` still cannot reach a
+download endpoint. The capability lives in `dancer-yandex`, behind a feature flag,
+reachable only from the score-lookup path.
+
 ---
 
 ## 6. Open questions

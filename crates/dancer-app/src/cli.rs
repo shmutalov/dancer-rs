@@ -30,6 +30,8 @@ pub struct Args {
     /// Do not follow the system media session. Without this, and with no `--audio`
     /// or `--score`, the dancer follows whatever the user is playing.
     pub no_smtc: bool,
+    /// Never fetch a streamed track, whatever the config says.
+    pub no_fetch: bool,
     /// Folders to analyse into the cache, then exit.
     ///
     /// The SMTC source can only recognise tracks the library already knows, so
@@ -58,6 +60,7 @@ your music first:
   --no-cache            Always re-analyse; do not read or write scores.db
   --no-anticipate       Start without anticipation (middle-click toggles it)
   --no-smtc             Do not follow the system media session
+  --no-fetch            Never fetch a streamed track for analysis
   --rate <F>            Simulated transport speed, 1.0 nominal
   --stale <SECS>        Report positions this many seconds old
   -h, --help            This text
@@ -80,6 +83,7 @@ pub fn parse<I: Iterator<Item = String>>(args: I) -> Result<Args, String> {
             "--no-anticipate" => out.no_anticipate = true,
             "--no-smtc" => out.no_smtc = true,
             "--scan" => out.scan.push(PathBuf::from(value("--scan")?)),
+            "--no-fetch" => out.no_fetch = true,
             "--rate" => {
                 let v = value("--rate")?;
                 out.rate = Some(v.parse().map_err(|_| format!("--rate: {v} is not a number"))?);

@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 dancer-analyze = { path = "../dancer-analyze" }
+dancer-yandex = { path = "../dancer-yandex", optional = true }
 dancer-choreo = { path = "../dancer-choreo" }
 dancer-clock = { path = "../dancer-clock" }
 dancer-render = { path = "../dancer-render" }
@@ -25,3 +26,11 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 winit.workspace = true
 windows.workspace = true
+tokio = { version = "1", features = ["rt"], optional = true }
+
+[features]
+# On by default because it is the only path that gives a streamed track a grid.
+# Off is a supported configuration: yamuse wraps an undocumented API, and a break
+# there must never be able to take the binary down (spec §6.4).
+default = ["yandex"]
+yandex = ["dep:dancer-yandex", "dep:tokio"]

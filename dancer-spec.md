@@ -515,19 +515,57 @@ by §6.2 with no dependency, no auth flow and no undocumented API. Keep `yamuse`
 feature-flagged and reassess at M6 whether it earns its place at all; "install the
 desktop app" is a legitimate answer that costs nothing to maintain.
 
-**Do not reach the download endpoints.** Several Yandex wrappers expose lossless
-track downloads — fetch the file, analyse it, get a perfect grid.
+### 6.4.1 Fetching a streamed track to analyse it
 
-Cutting audio capture (§7) made this *more* tempting, not less. Recording was the
-legitimate route to a grid for a streamed track; with it gone, streaming is
-idle-only (§8.3) and a download endpoint sitting inside a dependency we already
-ship looks like the obvious way to close the gap. Losing the weaker option does not
-upgrade the stronger one: recording was local capture of audio already playing on
-the user's machine, disabled by default; this is retrieving masters from a CDN.
+**Reversed 2026-08-15, by the project owner, having considered the argument
+below.** The earlier rule was absolute — *do not reach the download endpoints* —
+and it is preserved here because the reasoning still applies to the *shape* the
+feature must take, even though the prohibition itself no longer holds.
 
-Keep `dancer-source` structurally unable to call them, rather than relying on
-nobody reaching. There is no sanctioned alternative for streamed tracks: they stay
-`Unscored` (§8.3). That is the decision, not a gap awaiting a workaround.
+The original reasoning: cutting audio capture (§7) made downloading *more*
+tempting, not less. Recording was the legitimate route to a grid for a streamed
+track; with it gone, streaming is idle-only (§8.3) and a download endpoint inside a
+dependency we already ship looks like the obvious way to close the gap. Losing the
+weaker option does not upgrade the stronger one — recording was local capture of
+audio already playing on the user's machine, whereas this retrieves masters from a
+CDN.
+
+**What changed the decision.** The gap turned out to be the whole product for a
+streaming user. §6.2 gives identity, position and pause for everything, but
+`Locked` — every part of §9 through §11, which is what this project is *for* —
+requires a file. A user who streams exclusively gets FAOSDance with pause detection
+and nothing more. That is not a limitation at the edges; it is the feature not
+existing. Downloading also yields the *exact master being streamed*, so the grid is
+right, where a local rip of the same song can be 40 ms out.
+
+The owner's position: the app can fetch, the **user** initiates, and nothing is
+redistributed. That is a defensible line, and it is theirs to draw.
+
+**The shape is not optional, though, and it is what makes the line real:**
+
+1. **Fetch, analyse, delete.** The audio is a means, not an artifact. It is removed
+   before the score is written, by a guard that also fires on error paths and on
+   panic. No cache of audio, no resumable partials, no "keep" setting.
+2. **What is retained is a grid** — a few kilobytes of beat timings. Facts about
+   when the drums hit, not a copy of the recording.
+3. **The lowest bitrate on offer, never lossless.** beat-this resamples everything
+   to 22.05 kHz, so a grid from a 64 kbps stream is identical to one from FLAC. The
+   extra bytes would buy nothing except a better copy of somebody's master. Taking
+   the worst copy that decodes is both correct and the clearest possible statement
+   of intent.
+4. **The user initiates, per track.** No crawler, no playlist sweep, no
+   pre-analysis of a library. A track is fetched because the user is playing *that
+   track*. There is deliberately no batch mode, and adding one would change what
+   this is.
+5. **Off unless asked for.** Requires the `yandex` feature, an OAuth token, and
+   `fetch_for_analysis = true`. Supplying a credential is the unambiguous act of
+   asking; a default could never be.
+6. **A match must be confirmable.** Duration is required evidence, not a weighted
+   term: a perfect title and artist with no duration to check scores below the
+   threshold and does not trigger a fetch. Being wrong here means having retrieved
+   a stranger's track to build a grid that was wrong anyway.
+
+Every failure degrades to `Unscored` and none can take the binary down.
 
 ### 6.5 Local file adapter (development)
 

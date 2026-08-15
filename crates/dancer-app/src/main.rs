@@ -146,6 +146,7 @@ fn main() -> anyhow::Result<()> {
         // can be judged — the dancer moves to music you can hear.
         (None, None) if !args.no_smtc => {
             let db = (!args.no_cache).then(|| dir.join(SCORE_DB));
+            let fallback = stream_fallback(&cfg, &args, &dir);
             match dancer_source::SmtcSource::new(cfg.source.allowlist.clone()) {
                 Ok(source) => {
                     let tx2 = tx.clone();
@@ -156,7 +157,12 @@ fn main() -> anyhow::Result<()> {
                         // library index from M2 is the whole bridge — analysis is
                         // impossible here because there is no file to analyse.
                         Some(Box::new(move |meta| {
-                            library::spawn_lookup(db.clone(), meta.clone(), tx2.clone());
+                            library::spawn_lookup(
+                                db.clone(),
+                                meta.clone(),
+                                fallback.clone(),
+                                tx2.clone(),
+                            );
                         })),
                         tx.clone(),
                     )?;
@@ -209,6 +215,33 @@ fn main() -> anyhow::Result<()> {
     };
     event_loop.run_app(&mut app)?;
     Ok(())
+}
+
+/// Whether to fetch a streamed track in order to analyse it (spec §6.4).
+///
+/// Three conditions, all required, none of them a default: the feature compiled
+/// in, a token supplied, and `fetch_for_analysis` switched on. Reaching out to
+/// fetch audio is not something the app should ever start doing on its own.
+fn stream_fallback(
+    cfg: &Config,
+    args: &cli::Args,
+    dir: &Path,
+) -> Option<library::StreamFallback> {
+    if args.no_fetch || !cfg.source.yandex.enabled() {
+        return None;
+    }
+    tracing::info!(
+        "streamed-track analysis is on: tracks with no local match will be fetched, \
+         analysed and deleted"
+    );
+    Some(library::StreamFallback {
+        #[cfg(feature = "yandex")]
+        token: cfg.source.yandex.token.clone(),
+        models: args.models.clone().unwrap_or_else(|| dir.join("models")),
+        // Beside the cache, not in the user's temp: a file we are contractually
+        // obliged to delete should be somewhere we can see if it survives.
+        scratch: dir.join("scratch"),
+    })
 }
 
 /// `--scan`: fill the cache so SMTC has something to recognise (spec §13).

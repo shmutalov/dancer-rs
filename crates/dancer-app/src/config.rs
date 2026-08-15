@@ -29,6 +29,32 @@ pub struct SourceCfg {
     /// identifying as `Яндекс Музыка.exe`. The app logs every session it sees, so
     /// this can be filled in from observation.
     pub allowlist: Vec<String>,
+    pub yandex: YandexCfg,
+}
+
+/// Yandex Music, for streamed tracks only (spec §6.4).
+///
+/// Off unless a token is present, and that is deliberate. This is the one part of
+/// the app that reaches out and fetches audio, so it does not start doing so
+/// because a default said it could — the user has to supply a credential, which is
+/// an unambiguous act of asking for it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct YandexCfg {
+    /// OAuth token. Empty disables the whole path.
+    pub token: String,
+    /// Whether to fetch a streamed track in order to analyse it.
+    ///
+    /// Requires `token`, and applies only to the track currently playing. The
+    /// audio is deleted as soon as the grid is built — nothing is kept and nothing
+    /// is redistributed. There is deliberately no batch or playlist mode.
+    pub fetch_for_analysis: bool,
+}
+
+impl YandexCfg {
+    pub fn enabled(&self) -> bool {
+        self.fetch_for_analysis && !self.token.trim().is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
