@@ -1,0 +1,10 @@
+[package]
+name = "dancer-clock"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+dancer-score = { path = "../dancer-score" }
+tracing.workspace = true

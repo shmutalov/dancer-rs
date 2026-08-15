@@ -66,20 +66,27 @@ impl Manifest {
         }
     }
 
-    /// Name for row `r`, honouring an explicit `index` when given and otherwise
+    /// Entry for row `r`, honouring an explicit `index` when given and otherwise
     /// falling back to declaration order.
+    pub fn row_at(&self, r: usize) -> Option<&RowManifest> {
+        self.rows.iter().find(|row| row.index == Some(r)).or_else(|| {
+            // Only use positional fallback if no row declares an index at all;
+            // mixing the two silently would be worse than ignoring it.
+            self.rows
+                .iter()
+                .all(|row| row.index.is_none())
+                .then(|| self.rows.get(r))
+                .flatten()
+        })
+    }
+
     pub fn row_name(&self, r: usize) -> Option<String> {
-        self.rows
-            .iter()
-            .find(|row| row.index == Some(r))
-            .or_else(|| {
-                // Only use positional fallback if no row declares an index at all;
-                // mixing the two silently would be worse than ignoring it.
-                self.rows.iter().all(|row| row.index.is_none())
-                    .then(|| self.rows.get(r))
-                    .flatten()
-            })
-            .map(|row| row.name.clone())
+        self.row_at(r).map(|row| row.name.clone())
+    }
+
+    /// `(beats_per_loop, impact_cell)` for row `r`.
+    pub fn row_timing(&self, r: usize) -> Option<(u32, u32)> {
+        self.row_at(r).map(|row| (row.beats_per_loop, row.impact_cell))
     }
 }
 

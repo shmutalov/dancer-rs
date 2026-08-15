@@ -1,19 +1,28 @@
-//! dancer-rs — M0: window and sprite playback.
+//! dancer-rs — M1: the beat clock drives the sprite.
 //!
-//! FAOSDance parity: loads an existing sheet plus its `.txt`, loops at a fixed
-//! frame rate, transparent, click-through, draggable. No clock, no analysis, no
-//! sources — those land in M1 onward.
+//! M0 looped a sheet at a fixed frame rate. This adds the parts that make the
+//! animation mean something: a `Source` reporting where playback is, a `BeatClock`
+//! steering a local estimate from those reports, and cell selection derived from
+//! the beat grid rather than from a timer.
+//!
+//! Anticipation — starting a move early so its impact cell lands *on* the beat — is
+//! M3 and is deliberately absent. What is here locks phase to the grid; what M3
+//! adds is choosing which move and when to begin it.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
+use crossbeam_channel::{Receiver, Sender};
 use dancer_render::{
     apply_window_styles, capture_owner, hwnd_of, present, primary_button_down, reassert_topmost,
     surface_size, Surface,
 };
+use dancer_score::Score;
+use dancer_source::{FileSource, Source};
 use dancer_sprite::Sheet;
 use winit::application::ApplicationHandler;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
@@ -24,8 +33,19 @@ use winit::window::{Window, WindowId, WindowLevel};
 use windows::Win32::Foundation::{HWND, POINT};
 use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 
+mod cli;
 mod config;
+mod events;
+mod playback;
+
 use config::{data_dir, Config};
+use events::AppEvent;
+use playback::Playback;
+
+/// Grid-driven states re-evaluate at this rate and redraw only when the cell
+/// actually changes. Cheaper than computing exact cell boundaries and immune to
+/// the off-by-one errors that boundary maths invites.
+const GRID_TICK: Duration = Duration::from_millis(8);
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -33,26 +53,41 @@ fn main() -> anyhow::Result<()> {
             tracing_subscriber::EnvFilter::try_from_default_env()
                 // The binary target is `dancer-rs`, so its crate name is
                 // `dancer_rs` — not `dancer_app`, which matches nothing.
-                .unwrap_or_else(|_| "dancer_rs=info,dancer_render=info,dancer_sprite=info".into()),
+                .unwrap_or_else(|_| {
+                    "dancer_rs=info,dancer_render=info,dancer_sprite=info,dancer_score=info".into()
+                }),
         )
         .with_target(false)
         .init();
+
+    let args = match cli::parse(std::env::args().skip(1)) {
+        Ok(a) => a,
+        Err(msg) => {
+            eprintln!("{msg}");
+            std::process::exit(if msg == cli::USAGE { 0 } else { 2 });
+        }
+    };
 
     let dir = data_dir();
     tracing::info!(dir = %dir.display(), "data directory");
 
     let cfg = Config::load(&dir);
 
-    // A path on the command line overrides the configured sheet, which is how
-    // compatibility checks against real sheets are driven without editing files.
-    // It is resolved against the working directory, not the data directory —
-    // anything else would surprise whoever typed it.
-    let sheet_path = match std::env::args().nth(1) {
-        Some(arg) => PathBuf::from(arg),
-        None => cfg.sheet_path(&dir),
-    };
+    let sheet_path = args.sheet.clone().unwrap_or_else(|| cfg.sheet_path(&dir));
     let sheet = Sheet::load(&sheet_path)
         .with_context(|| format!("loading sheet {}", sheet_path.display()))?;
+
+    let (tx, rx) = crossbeam_channel::unbounded();
+
+    // Without a score the app is exactly M0: a sheet looping at a fixed rate. That
+    // is the honest `Unscored` behaviour (spec §10), not a degraded mode.
+    if let Some(score_path) = args.score.clone() {
+        let score = Score::load(&score_path)
+            .with_context(|| format!("loading score {}", score_path.display()))?;
+        spawn_source(&args, score, score_path, cfg.playback.poll_secs, tx.clone())?;
+    } else {
+        tracing::info!("no --score given; running Unscored at a fixed frame rate");
+    }
 
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Wait);
@@ -60,8 +95,10 @@ fn main() -> anyhow::Result<()> {
     let mut app = App {
         row: sheet.default_row,
         sheet,
+        playback: Playback::new(Instant::now(), cfg.playback.offset_secs),
         cfg,
         dir,
+        rx,
         window: None,
         hwnd: None,
         surface: None,
@@ -75,17 +112,102 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Start the polling thread (spec §3.2's source-poll thread).
+fn spawn_source(
+    args: &cli::Args,
+    score: Score,
+    score_path: PathBuf,
+    poll_secs: f64,
+    tx: Sender<AppEvent>,
+) -> anyhow::Result<()> {
+    // The file source decodes nothing, so any existing path satisfies it. The
+    // score's own path is the sensible default; --audio is for pointing at the
+    // real track when you want to play it yourself and watch the dancer against it.
+    let audio = args.audio.clone().unwrap_or(score_path);
+    let now = Instant::now();
+
+    let mut source = FileSource::new(&audio, score.duration_secs(), now);
+    if let Some(rate) = args.rate {
+        source = source.with_rate(rate);
+    }
+    if let Some(stale) = args.staleness {
+        source = source.with_staleness(stale);
+    }
+    if !source.available() {
+        anyhow::bail!("{} does not exist", audio.display());
+    }
+
+    let meta = source.meta().clone();
+    let score = Arc::new(score);
+    let interval = Duration::from_secs_f64(poll_secs.clamp(0.1, 30.0));
+
+    tracing::info!(
+        audio = %audio.display(),
+        track = %meta.id,
+        duration = score.duration_secs(),
+        bpm = score.bpm,
+        meter = score.meter,
+        poll_secs = interval.as_secs_f64(),
+        rate = args.rate.unwrap_or(1.0),
+        stale_secs = args.staleness.unwrap_or_default().as_secs_f64(),
+        "file source"
+    );
+
+    // M1 pairs the score with the track directly. M2 replaces this with the
+    // SQLite lookup: `library` by (title, artist) hash, then `scores` by id.
+    let _ = tx.send(AppEvent::TrackChanged {
+        id: meta.id.clone(),
+        meta: meta.clone(),
+    });
+    let _ = tx.send(AppEvent::ScoreReady {
+        id: meta.id.clone(),
+        score,
+    });
+
+    std::thread::Builder::new()
+        .name("source-poll".into())
+        .spawn(move || loop {
+            match source.poll() {
+                Ok(Some(obs)) => {
+                    let msg = AppEvent::PositionReport {
+                        pos_secs: obs.position_secs(),
+                        playing: obs.playing,
+                        // Travels with the observation, so the render thread never
+                        // needs to timestamp on receipt (spec §6.1).
+                        at: obs.observed_at,
+                    };
+                    if tx.send(msg).is_err() {
+                        return; // render thread gone
+                    }
+                }
+                Ok(None) => {
+                    if tx.send(AppEvent::PlaybackStopped).is_err() {
+                        return;
+                    }
+                }
+                Err(e) => {
+                    if tx.send(AppEvent::SourceLost(e.to_string())).is_err() {
+                        return;
+                    }
+                }
+            }
+            std::thread::sleep(interval);
+        })?;
+    Ok(())
+}
+
 struct App {
     cfg: Config,
     dir: PathBuf,
     sheet: Sheet,
+    playback: Playback,
+    rx: Receiver<AppEvent>,
     window: Option<Window>,
     hwnd: Option<HWND>,
     surface: Option<Surface>,
     row: usize,
     cell: usize,
-    /// Top-left in physical screen pixels. Authoritative — `UpdateLayeredWindow`
-    /// moves the window as part of presenting, so this is the position.
+    /// Top-left in physical screen pixels.
     pos: (i32, i32),
     /// Cursor-to-window offset captured at mouse-down.
     drag: Option<(i32, i32)>,
@@ -104,6 +226,14 @@ impl App {
             self.sheet.cell_height,
             self.cfg.sprite.scale,
         )
+    }
+
+    /// Beats one pass through the current row occupies (spec §4.2).
+    fn beats_per_loop(&self) -> u32 {
+        self.sheet
+            .rows
+            .get(self.row)
+            .map_or(1, |r| r.beats_per_loop.max(1))
     }
 
     /// Place the window from normalised config coordinates on the chosen monitor.
@@ -197,6 +327,51 @@ impl App {
         }
     }
 
+    /// Drain the source thread's messages into the state machine.
+    ///
+    /// Draining here rather than waking the loop per message costs at most one
+    /// frame of latency and no accuracy: every message carries the instant it
+    /// describes.
+    fn drain_events(&mut self) {
+        while let Ok(ev) = self.rx.try_recv() {
+            self.playback.apply(ev);
+        }
+    }
+
+    /// Advance the animation. Returns when the next tick is due.
+    ///
+    /// Two regimes, and the difference is the whole milestone: `Locked` reads the
+    /// cell out of the beat grid, so phase cannot drift; everything else counts
+    /// frames off a timer, which is M0's behaviour and is honest about knowing no
+    /// tempo (spec §10's `Unscored`).
+    fn tick(&mut self, now: Instant) -> Instant {
+        let cells = self.sheet.cells_per_row().max(1);
+
+        // Dragging owns the sprite: the Held row is a single pose, and letting the
+        // grid drive it would fight the interaction.
+        if self.drag.is_none() {
+            if let Some(cell) = self.playback.grid_cell(now, self.beats_per_loop(), cells) {
+                if cell != self.cell {
+                    self.cell = cell;
+                    self.draw();
+                }
+                return now + GRID_TICK;
+            }
+        }
+
+        if now >= self.next_frame {
+            self.cell = (self.cell + 1) % cells;
+            self.draw();
+            // Advance from the scheduled time, not from now, so the loop does not
+            // drift slower than the configured rate.
+            self.next_frame += self.frame_interval();
+            if self.next_frame < now {
+                self.next_frame = now + self.frame_interval();
+            }
+        }
+        self.next_frame
+    }
+
     fn begin_drag(&mut self) {
         if self.drag.is_some() {
             return;
@@ -227,6 +402,9 @@ impl App {
             self.row = prev;
             self.cell = 0;
         }
+        // Resume on a timer boundary rather than mid-interval; the grid path
+        // re-derives its own cell on the next tick regardless.
+        self.next_frame = Instant::now();
         if let Some(hwnd) = self.hwnd {
             // Clicking never raises a WS_EX_NOACTIVATE window, so z-order lost
             // during the drag would otherwise never come back.
@@ -234,7 +412,7 @@ impl App {
         }
         tracing::debug!(
             pos = ?self.pos,
-            capture = ?self.hwnd.map(capture_owner),
+            state = self.playback.state.name(),
             "drag end"
         );
     }
@@ -292,6 +470,8 @@ impl ApplicationHandler for App {
             w, h,
             pos = ?self.pos,
             fps = self.cfg.sprite.fps,
+            offset_secs = self.cfg.playback.offset_secs,
+            beats_per_loop = self.beats_per_loop(),
             click_through = self.cfg.window.click_through,
             "window up"
         );
@@ -319,17 +499,17 @@ impl ApplicationHandler for App {
                     "mouse"
                 );
                 match (button, state) {
-                (MouseButton::Left, ElementState::Pressed) => self.begin_drag(),
-                (MouseButton::Left, ElementState::Released) => self.end_drag(),
-                // M0 has no tray yet, and WS_EX_NOACTIVATE means no keyboard —
-                // so right-click is the only way out. Replaced by the tray in M5.
-                (MouseButton::Right, ElementState::Pressed) => {
-                    self.end_drag();
-                    self.store_position(el);
-                    let _ = self.cfg.save(&self.dir);
-                    el.exit();
-                }
-                _ => {}
+                    (MouseButton::Left, ElementState::Pressed) => self.begin_drag(),
+                    (MouseButton::Left, ElementState::Released) => self.end_drag(),
+                    // M1 still has no tray, and WS_EX_NOACTIVATE means no keyboard
+                    // — so right-click is the only way out. Replaced in M5.
+                    (MouseButton::Right, ElementState::Pressed) => {
+                        self.end_drag();
+                        self.store_position(el);
+                        let _ = self.cfg.save(&self.dir);
+                        el.exit();
+                    }
+                    _ => {}
                 }
             }
             _ => {}
@@ -337,6 +517,8 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
+        self.drain_events();
+
         // While dragging, track the cursor in screen coordinates. Window-relative
         // events are useless here because the window moves with the pointer.
         if self.drag.is_some() && !primary_button_down() {
@@ -354,18 +536,8 @@ impl ApplicationHandler for App {
         }
 
         let now = Instant::now();
-        if now >= self.next_frame {
-            let cells = self.sheet.cells_per_row().max(1);
-            self.cell = (self.cell + 1) % cells;
-            self.draw();
-            // Advance from the scheduled time, not from now, so the loop does not
-            // drift slower than the configured rate.
-            self.next_frame += self.frame_interval();
-            if self.next_frame < now {
-                self.next_frame = now + self.frame_interval();
-            }
-        }
-        el.set_control_flow(ControlFlow::WaitUntil(self.next_frame));
+        let next = self.tick(now);
+        el.set_control_flow(ControlFlow::WaitUntil(next.max(now)));
     }
 }
 

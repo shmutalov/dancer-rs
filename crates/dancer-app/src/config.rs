@@ -14,6 +14,31 @@ use serde::{Deserialize, Serialize};
 pub struct Config {
     pub sprite: Sprite,
     pub window: WindowCfg,
+    pub playback: Playback,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Playback {
+    /// Output latency in seconds (spec §9.2), the nudge slider's stored value.
+    ///
+    /// Everything between "the player says 42.0 s" and "the sound reaches the
+    /// speakers". At 128 BPM a beat is 469 ms, so leaving this at zero can put the
+    /// dancer more than half a beat out — it is not a rounding concern.
+    pub offset_secs: f64,
+    /// How often to ask the source where it is.
+    pub poll_secs: f64,
+}
+
+impl Default for Playback {
+    fn default() -> Self {
+        Self {
+            // Spec §9.2's local-playback default. Browsers want ~250 ms; per-source
+            // values arrive with the tray UI in M5.
+            offset_secs: 0.180,
+            poll_secs: 2.0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,6 +71,7 @@ impl Default for Config {
         Self {
             sprite: Sprite::default(),
             window: WindowCfg::default(),
+            playback: Playback::default(),
         }
     }
 }

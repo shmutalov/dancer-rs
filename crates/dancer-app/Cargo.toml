@@ -10,9 +10,13 @@ name = "dancer-rs"
 path = "src/main.rs"
 
 [dependencies]
+dancer-clock = { path = "../dancer-clock" }
 dancer-render = { path = "../dancer-render" }
+dancer-score = { path = "../dancer-score" }
+dancer-source = { path = "../dancer-source" }
 dancer-sprite = { path = "../dancer-sprite" }
 anyhow.workspace = true
+crossbeam-channel.workspace = true
 serde.workspace = true
 toml.workspace = true
 tracing.workspace = true

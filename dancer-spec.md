@@ -357,8 +357,21 @@ pub struct Observation {
 }
 ```
 
-`observed_at` must be sampled immediately after the underlying read returns, not
-when the message is handled. Everything downstream depends on that pairing.
+`observed_at` must be the instant the reported position was **true**, not the
+instant the value was read and not the instant the message is handled. For SMTC
+that is `LastUpdatedTime` (§6.2). Everything downstream depends on that pairing: a
+reading 87 seconds old is exact when paired with its own timestamp and 87 seconds
+wrong when paired with `Instant::now()`.
+
+**Implemented synchronous, not `async` (M1).** Nothing that exists needs async, and
+it is not free — `async_trait` boxes every call and an async trait implies a tokio
+runtime in the workspace. The adapters divide cleanly: SMTC (M4) is WinRT, whose
+async operations expose a blocking `join()` — Phase 0.5 used exactly that — and it
+runs on its own thread anyway (§3.2), where blocking is the point. Spotify and
+Yandex (M6) genuinely want async and will bring their own runtime. So deferring
+costs one `Source` impl wrapping `block_on` when an HTTP adapter first appears, and
+not deferring costs a runtime dependency carried from M1 to M6 for nothing.
+Revisit at M6.
 
 ### 6.2 SMTC adapter (primary, universal)
 
@@ -676,6 +689,22 @@ else                                  -> slew: rate = clamp(1.0 + err / SLEW_WIN
 `SLEW_WINDOW` ≈ 5 s. Never step the position while `Locked` — a visible jump in
 the dancer's phase is far more noticeable than being 80 ms off for a few seconds.
 Correct by bending the rate.
+
+**Those two rules contradict each other, and M1 found it.** The middle band
+prescribes a hard re-anchor, which *is* a step, while the paragraph above forbids
+stepping while `Locked`. Both cannot hold: ±2 % closes only 100 ms per 5 s, so a
+1.4 s error would take over a minute to slew out, and sitting a beat off for a
+minute is worse than one visible jump.
+
+M1 implements the three bands literally and returns a distinct `Correction` variant
+for each, so a step is always visible to the caller rather than silent. The real
+resolution needs M3: defer the step to the current row's loop boundary, where the
+sprite is already returning to its neutral pose and a phase change costs nothing to
+look at. Until the scheduler exists there is no boundary to defer to.
+
+In practice the middle band is rare — measured across a 3-minute run against a
+player drifting 0.02 % with 2 s stale readings, every correction was a slew and
+none was a step.
 
 ### 9.2 Offset calibration
 

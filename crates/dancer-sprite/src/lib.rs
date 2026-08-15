@@ -58,6 +58,14 @@ pub struct Row {
     /// Premultiplied BGRA, one `u32` per pixel, `0xAARRGGBB` in native order.
     /// Indexed `[cell][y * width + x]`.
     pub cells: Arc<[Arc<[u32]>]>,
+    /// How many beats one pass through this row occupies (spec §4.2).
+    ///
+    /// Relative to the score's `meter`, not assumed to be four. Defaults to 1, so
+    /// a sheet with no manifest animates one loop per beat.
+    pub beats_per_loop: u32,
+    /// Cell whose artwork is the move's accent — the one that must land *on* the
+    /// beat (spec §11.2). Carried from M0; the scheduler that uses it is M3.
+    pub impact_cell: u32,
 }
 
 /// A loaded sprite sheet, ready to blit.
@@ -161,9 +169,12 @@ impl Sheet {
                 })
                 .collect();
 
+            let timing = manifest.as_ref().and_then(|m| m.row_timing(r as usize));
             rows.push(Row {
                 name,
                 cells: cells.into(),
+                beats_per_loop: timing.map_or(1, |t| t.0.max(1)),
+                impact_cell: timing.map_or(0, |t| t.1),
             });
         }
 
