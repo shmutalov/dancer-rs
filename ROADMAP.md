@@ -336,6 +336,10 @@ with no mid-move cuts on pause.
   this is now the only latency correction, so make it easy to reach).
 - Ship the `beat-this` ONNX weights: ~270 KB mel + ~10 MB small model. Not bundled
   in the crate; pin a checksum.
+- **Investigate the shared score cache** (spec §17.4). Not a build task yet: settle
+  the licensing read and the hosting/curation answer. It is the only route to
+  streaming support, since §4.1 removed the local one — but it only earns
+  infrastructure if the local-file product proves worth extending.
 - Packaging and a neutral default sheet. **Do not ship FL-Chan** — Image-Line's
   artwork must not be redistributed (spec §1.3). Credit FAOSDance (MIT) for the
   sheet format.
@@ -440,11 +444,13 @@ Carried forward, with the resolved ones struck.
    fixed fps, honest about knowing nothing.
 3. Is 8 cells worth keeping as a hard constraint? **Keep it**, with the manifest
    free to override later. Costs nothing, buys the existing sheet library.
-4. **Promoted — now the only route to streaming support.** Should scores be
-   shareable: a fetchable cache of analysed track IDs, so a grid computed once
-   serves everyone? A score is timing metadata and contains no audio, which is what
-   makes this plausible where recording was not. Needs a licensing read and a
-   hosting answer. Spotify and Yandex are idle-only until it exists.
+4. **Promoted — now the only route to streaming support. Investigate at M5.**
+   Should scores be shareable: a fetchable cache of analysed track IDs, so a grid
+   computed once serves everyone? A score is timing metadata — ~20 KB of numbers,
+   **no audio** — which is what makes this plausible where recording was not.
+   Gated on two answers: whether distributing derived timing data is clear, and who
+   hosts and curates it. Scheduled after the local-file product works, so we learn
+   whether streaming is wanted before running infrastructure for it.
 5. **New:** Rust edition and MSRV. See §0.3.
 6. **New:** Does Yandex need ynison push-position, or does SMTC suffice? **Decide at
    M6, not before.** The answer picks the crate — `yandex-music` for the resolver

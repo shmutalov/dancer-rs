@@ -833,13 +833,19 @@ plumbing to feed it.
    the manifest allow arbitrary widths with 8 as the default? **Keep it**, with the
    manifest free to override later. Costs nothing and buys the whole existing
    sheet library.
-4. **Promoted — this is now the only path to streaming support.** Should scores be
-   shareable: a fetchable cache of analysed track IDs, so a grid computed once by
-   anyone serves everyone? A score is timing metadata — beat times, downbeats, bpm
-   — and contains no audio, which is what makes this plausible where recording was
-   not. With learn-on-second-listen cut (§8.3), Spotify and Yandex are idle-only
-   until this exists. Needs a licensing read and a hosting/curation answer before
-   it can be designed. See §7 for what it replaces.
+4. **Promoted — this is now the only path to streaming support. Investigate at M5.**
+   Should scores be shareable: a fetchable cache of analysed track IDs, so a grid
+   computed once by anyone serves everyone? A score is timing metadata — beat times,
+   downbeats, bpm, meter, roughly 20 KB of numbers — and contains **no audio**,
+   which is what makes this plausible where recording (§7) was not. Closer to a BPM
+   database or a chord chart than to a copy of the song.
+
+   With learn-on-second-listen cut (§8.3), Spotify and Yandex are idle-only until
+   this exists. Two questions gate any design work: whether distributing derived
+   timing data is actually clear, and who hosts and curates it.
+
+   Deliberately scheduled *after* the local-file product works, so we learn whether
+   streaming is wanted before committing to run infrastructure for it.
 5. Rust edition and MSRV. §1 says 2021 / 1.75+, written before this dependency set;
    edition 2024 (Rust 1.85+) is likely the better default. Settle before `cargo new`.
 6. Does Yandex need ynison push-position, or does SMTC suffice? The answer picks
