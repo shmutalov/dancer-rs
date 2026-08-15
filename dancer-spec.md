@@ -83,7 +83,7 @@ dancer-rs/
 ├── crates/
 │   ├── dancer-sprite/      Sheet loading, manifest parsing, frame indexing
 │   ├── dancer-render/      winit window, compositing, Win32 window styles
-│   ├── dancer-score/       Score types, redb cache store, library index
+│   ├── dancer-score/       Score types, SQLite cache store, library index
 │   ├── dancer-clock/       BeatClock, drift correction, phase estimation
 │   ├── dancer-choreo/      Move selection, anticipation scheduling
 │   ├── dancer-source/      `Source` trait + adapters (smtc, spotify, yandex, file)
@@ -192,8 +192,8 @@ about the anticipation behaviour derives from it.
 
 ## 5. Score format
 
-Serialised into a single-file `redb` store (§5.1), keyed by canonical track ID.
-Shown here as JSON for readability.
+Stored in a single-file SQLite database (§5.1), keyed by canonical track ID. Shown
+here as JSON for readability.
 
 ```json
 {
@@ -244,15 +244,10 @@ Field notes:
 
 ### 5.1 Cache
 
-**One file, `scores.db`, using `redb`.** Not a JSON file per track: a user with a
-few hundred analysed tracks should not get a few hundred files scattered under a
-directory they will never find. Everything the app owns lives in one folder beside
-the executable (§13).
-
-`redb` is pure Rust and single-file. The workload is point lookup on track start
-and insert after analysis, so a key-value store is the right shape and SQL would
-buy nothing — and `rusqlite` would reintroduce a C compiler to a build that
-currently has none, which is the same property §8.1 was chosen to protect.
+**One file, `scores.db`, SQLite via `rusqlite` (`bundled`).** Not a JSON file per
+track: a user with a few hundred analysed tracks should not get a few hundred files
+scattered under a directory they will never find. Everything the app owns lives in
+one folder beside the executable (§13).
 
 Two tables:
 
@@ -271,9 +266,41 @@ own player. See §8.3.
 Because it is a single file, copying it elsewhere works. That is a property, not a
 feature: we neither build nor support sharing (§17.4).
 
-**Trade-off accepted:** a `redb` file is opaque where a SQLite file opens in any
-free browser. Ship a `dancer-rs dump` subcommand so a suspect grid can still be
-inspected.
+### 5.2 Why SQLite and not an embedded KV store
+
+`redb` was chosen first, on the grounds that the workload is pure key-value and
+that it keeps a C compiler out of a build that otherwise has none — the property
+§8.1 protects. That reasoning did not survive examination.
+
+| | `redb` | SQLite |
+|---|---|---|
+| Build cost | none | **53 s, one-time** (measured, GNU toolchain, 33 packages) |
+| Runtime dependency | none | none — still one executable |
+| On-disk format | broke at 2.0 and again at 3.0 | stable since 2004, committed to 2050 |
+| Inspectable | only by Rust at a matching major version | any SQLite tool, ad-hoc `SELECT` included |
+
+Three things decided it:
+
+1. **Format churn against expensive data.** At the 41–74x realtime measured in
+   Phase 0.1, a 2,000-track library is roughly two hours of analysis. redb's format
+   broke twice in two years, and the 2→3 migration was only reachable *through* an
+   intermediate 2.6 release — so a user who skips a version can hold a cache the
+   binary can neither open nor migrate. Pinning and writing in-app migrations is
+   possible, but it is permanent work that SQLite simply never asks for. Schema
+   versioning is still ours to do; container migration is not.
+2. **Opacity.** A support request becomes "send me `scores.db`" only if the file
+   opens in something. And if the app will not start, an opaque cache cannot be
+   inspected at all.
+3. **Ecosystem and bus factor.** No tooling, no migration story, essentially one
+   maintainer.
+
+The `rten` precedent does not transfer. Avoiding a C dependency was right there
+because the alternative was PyTorch and NATTEN — a burden on *every user*, and an
+install many could not complete. `libsqlite3-sys` is a one-time build step on the
+developer's machine. Same shape of argument, different order of magnitude.
+
+**Schema versioning is still required.** Use `PRAGMA user_version`, check on open,
+migrate forward in code. The score shape will change; that work exists either way.
 
 ---
 
@@ -752,7 +779,7 @@ executable:
 dancer-rs/
 ├── dancer-rs.exe
 ├── config.toml        hand-editable; hot-reloaded via `notify`
-├── scores.db          single-file cache — grids + library index (§5.1)
+├── scores.db          single-file SQLite cache — grids + library index (§5.1)
 ├── models/            beat-this ONNX weights (§8.1) — must ship anyway
 └── artwork/           sprite sheets
 ```
@@ -802,7 +829,7 @@ analyze_on_scan = false            # true = analyse everything up front
 
 [analysis]
 model_dir = "models"               # beat-this ONNX weights; see §8.1
-cache = "scores.db"                # single-file redb store; see §5.1
+cache = "scores.db"                # single-file SQLite store; see §5.1
 sidecar_path = "sidecar/dancer-analyze.exe"    # optional, M6
 min_confidence = 0.6
 
@@ -860,7 +887,7 @@ plumbing to feed it.
 | `rspotify` | Spotify Web API + OAuth PKCE (M6) |
 | `yandex-music` | Yandex track ID resolution (M6, §6.4) |
 | `serde` / `serde_json` / `toml` | Score, manifest, config |
-| `redb` | Single-file score cache and library index (§5.1) |
+| `rusqlite` (`bundled`) | Single-file score cache and library index (§5.1) |
 | `crossbeam-channel` | Thread messaging |
 | `notify` | Config and artwork hot reload |
 | `tray-icon` | System tray |

@@ -20,7 +20,7 @@ removes something the original spec assumed was necessary.
 | Windows 10 | **First-class, not degraded** | Large share of the install base. No feature may require a Win11-only API. Applying that rule is what removed the audio subsystem — see §4.1 |
 | Audio capture | **Cut from v1** | No WASAPI, no loopback, no recording, no `dancer-audio`. Every purpose it served either dissolved or has a cheaper answer. Costs streaming support; see §4.1 |
 | Hosted score sharing | **Rejected** | No server, no hosting. Analyse and cache locally. Streaming is permanently `Unscored`; owned music via a library index is the product — see §4.2 |
-| Score cache | **`redb`**, single file beside the exe | Pure Rust, keeps a C compiler out of the build (same property `rten` was chosen for). Pure key-value workload; SQL buys nothing. Replaces one-JSON-per-track scattered under `%LOCALAPPDATA%` |
+| Score cache | **SQLite** (`rusqlite`, bundled), single file beside the exe | Reversed from `redb` after measuring both. redb's format broke twice in two years against data worth ~2 h of analysis to rebuild, and is opaque to every tool. The C-compiler objection measured 53 s of one-time build. See spec §5.2 |
 | Beat + downbeat tracking | **`beat-this`** (rten backend) | Rust port of the ISMIR 2024 tracker; reports verified F-measure parity with the PyTorch reference. Emits beats, downbeats and beat numbers — maps 1:1 onto the score format |
 | ML runtime | **`rten`**, with `ort` as cross-check | Ships inside `beat-this`. Do not add a second framework |
 | GGUF / `candle` | **Rejected** | GGUF is a ggml container for quantized LLMs; no MIR model is published in it. `candle` is capable but redundant when `rten` is already in the tree |
@@ -293,11 +293,12 @@ bugs. Keep these fixtures permanently as regression tests.
 - Ship the ONNX weights: ~270 KB mel + ~10 MB small model. Not bundled in the
   crate. Decide small vs full (~83 MB) on measured quality, not by default.
 - Emit `source: "beat-this"`, with a confidence heuristic.
-- Cache into a single `redb` file, `scores.db`, beside the exe (spec §5.1, §13).
+- Cache into a single SQLite file, `scores.db`, beside the exe (spec §5.1, §13).
   Two tables: `scores` keyed `{source}:{track_id}`, and `library` keyed on
   normalised `(title, artist)` → path. Namespaced per source.
-- Ship a `dancer-rs dump` subcommand. A `redb` file is opaque where SQLite is not,
-  and a suspect grid still has to be inspectable.
+- **Set `PRAGMA user_version` from the start** and check it on open. The score
+  shape will change; migrating from version 1 is far easier than retrofitting a
+  version onto files already in the wild.
 - `segments` may be empty — everything downstream must tolerate that.
 - Run analysis off-thread; `ScoreReady` arrives as an `AppEvent`.
 
