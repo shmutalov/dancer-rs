@@ -27,6 +27,14 @@ pub struct Args {
     /// Start with anticipation off — M1's plain grid loop. Middle-click toggles it
     /// at runtime, which is how the M3 A/B is actually judged.
     pub no_anticipate: bool,
+    /// Do not follow the system media session. Without this, and with no `--audio`
+    /// or `--score`, the dancer follows whatever the user is playing.
+    pub no_smtc: bool,
+    /// Folders to analyse into the cache, then exit.
+    ///
+    /// The SMTC source can only recognise tracks the library already knows, so
+    /// with an empty cache every track misses. Repeatable.
+    pub scan: Vec<PathBuf>,
     /// Run the simulated transport off nominal speed, to give the clock real drift
     /// to absorb. Dev lever for exercising spec §9.1.
     pub rate: Option<f64>,
@@ -37,11 +45,19 @@ pub struct Args {
 pub const USAGE: &str = "\
 dancer-rs [SHEET.png] [options]
 
+With no --audio or --score, follows whatever you are playing, via the system
+media session. It can only recognise tracks already in the cache, so analyse
+your music first:
+
+  dancer-rs --scan D:/music
+
+  --scan <DIR>          Analyse a music folder into the cache, then exit
   --audio <FILE>        Track to analyse and dance to (cached after the first run)
   --score <FILE.json>   Use this beat grid instead of analysing
   --models <DIR>        ONNX weights directory (default: <data dir>/models)
   --no-cache            Always re-analyse; do not read or write scores.db
   --no-anticipate       Start without anticipation (middle-click toggles it)
+  --no-smtc             Do not follow the system media session
   --rate <F>            Simulated transport speed, 1.0 nominal
   --stale <SECS>        Report positions this many seconds old
   -h, --help            This text
@@ -62,6 +78,8 @@ pub fn parse<I: Iterator<Item = String>>(args: I) -> Result<Args, String> {
             "--models" => out.models = Some(PathBuf::from(value("--models")?)),
             "--no-cache" => out.no_cache = true,
             "--no-anticipate" => out.no_anticipate = true,
+            "--no-smtc" => out.no_smtc = true,
+            "--scan" => out.scan.push(PathBuf::from(value("--scan")?)),
             "--rate" => {
                 let v = value("--rate")?;
                 out.rate = Some(v.parse().map_err(|_| format!("--rate: {v} is not a number"))?);

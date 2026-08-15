@@ -8,5 +8,7 @@ license.workspace = true
 [dependencies]
 dancer-score = { path = "../dancer-score" }
 beat-this = "1.0"
+# Already in the tree as beat-this's decoder; used here for tags (spec §5.1).
+symphonia = { version = "0.6", features = ["all-codecs", "all-formats"] }
 thiserror.workspace = true
 tracing.workspace = true

@@ -36,7 +36,7 @@ pub struct RowManifest {
     pub index: Option<usize>,
     #[serde(default)]
     pub impact_cell: u32,
-    #[serde(default = "one")]
+    #[serde(default = "default_beats_per_loop")]
     pub beats_per_loop: u32,
     #[serde(default)]
     pub pools: Vec<String>,
@@ -46,8 +46,15 @@ pub struct RowManifest {
     pub loopable: bool,
 }
 
-fn one() -> u32 {
-    1
+/// One loop per two beats.
+///
+/// Chosen to match the pacing of the sheets this format inherits. FAOSDance
+/// animated at a fixed ~12 fps regardless of tempo, which at ordinary dance tempos
+/// is roughly one 8-cell pass every two beats. One pass per *beat* — the obvious
+/// first guess — runs at 16.5 fps on a 124 BPM track, which reads as frantic
+/// against the same artwork.
+fn default_beats_per_loop() -> u32 {
+    2
 }
 fn yes() -> bool {
     true
@@ -140,7 +147,9 @@ mod tests {
         .unwrap();
         let r = &m.rows[0];
         assert_eq!(r.impact_cell, 3);
-        assert_eq!(r.beats_per_loop, 1);
+        // Two beats, not one: one 8-cell pass per beat reads as frantic at
+        // ordinary tempos. See `default_beats_per_loop`.
+        assert_eq!(r.beats_per_loop, 2);
         assert!(r.loopable);
         assert_eq!(r.pools, ["verse", "chorus"]);
     }

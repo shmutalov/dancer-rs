@@ -180,7 +180,10 @@ impl Sheet {
             rows.push(Row {
                 name,
                 cells: cells.into(),
-                beats_per_loop: rm.map_or(1, |m| m.beats_per_loop.max(1)),
+                // Sheets with no manifest at all — every inherited one — land here.
+                // Two beats per loop matches FAOSDance's pacing; see
+                // `manifest::default_beats_per_loop`.
+                beats_per_loop: rm.map_or(2, |m| m.beats_per_loop.max(1)),
                 impact_cell: rm.map_or(0, |m| m.impact_cell),
                 pools: rm.map(|m| m.pools.clone().into()).unwrap_or_else(|| Vec::new().into()),
                 energy: rm.and_then(|m| m.energy),

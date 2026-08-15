@@ -15,6 +15,8 @@ use std::sync::Arc;
 use crossbeam_channel::Sender;
 use dancer_analyze::Analyzer;
 use dancer_score::{Score, Store, TrackId, TrackMeta};
+#[cfg(test)]
+use dancer_score::ScoreSource;
 
 use crate::events::AppEvent;
 
@@ -79,12 +81,80 @@ pub fn resolve(
     }
 
     if let Some(store) = store {
-        if let Err(e) = store.record_analysis(id, meta, path, &score) {
+        // Index under the file's **own tags**, not under whatever the caller
+        // happened to name the track. SMTC reports those tags (spec §5.1, §6.2),
+        // so anything else guarantees a miss when the same file is later played
+        // through the user's own player — which is the entire point of the index.
+        let tags = dancer_analyze::tags::read(path);
+        let indexed = TrackMeta {
+            id: meta.id.clone(),
+            title: tags.title_or_stem(path),
+            artist: tags.artist_or_empty(),
+            duration_secs: Some(score.duration_secs()),
+        };
+        tracing::info!(
+            title = %indexed.title,
+            artist = %indexed.artist,
+            "indexed under the file's tags"
+        );
+        if let Err(e) = store.record_analysis(id, &indexed, path, &score) {
             // A cache we cannot write is a slow app, not a broken one.
             tracing::warn!(error = %e, "caching the score failed");
         }
     }
     Some((score, Origin::Analyzed))
+}
+
+/// Cache-only lookup for a track we have no file for (spec §6.2, §8.3).
+///
+/// SMTC reports `(title, artist)` and never a path, so there is nothing to analyse
+/// — either the track was analysed earlier and the `library` table remembers where
+/// it lives, or the dancer stays `Unscored`. This is the join that makes owned
+/// music work through the user's own player, and it is the point of M4.
+pub fn spawn_lookup(db: Option<PathBuf>, meta: TrackMeta, tx: Sender<AppEvent>) {
+    let spawned = std::thread::Builder::new()
+        .name("library-lookup".into())
+        .spawn(move || {
+            let Some(db) = db else { return };
+            let store = match Store::open(&db) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(path = %db.display(), error = %e, "opening the score cache failed");
+                    return;
+                }
+            };
+
+            match store.lookup(&meta) {
+                Ok(Some(score)) => {
+                    tracing::info!(
+                        title = %meta.title,
+                        artist = %meta.artist,
+                        key = %score.track_id,
+                        confidence = score.confidence,
+                        "library hit"
+                    );
+                    let _ = tx.send(AppEvent::ScoreReady {
+                        id: meta.id,
+                        score: Arc::new(score),
+                    });
+                }
+                Ok(None) => {
+                    // Expected and cheap. Spec §5.1 chose the miss deliberately:
+                    // hashing raw strings can fail to match, and that costs one
+                    // re-analysis, whereas canonicalising could match the *wrong*
+                    // master and apply a grid that is confidently off.
+                    tracing::info!(
+                        title = %meta.title,
+                        artist = %meta.artist,
+                        "no score in the library; staying Unscored"
+                    );
+                }
+                Err(e) => tracing::warn!(error = %e, "library lookup failed"),
+            }
+        });
+    if let Err(e) = spawned {
+        tracing::error!(error = %e, "could not start the lookup thread");
+    }
 }
 
 /// Run [`resolve`] off the render thread and deliver the result as an `AppEvent`.
@@ -152,6 +222,138 @@ pub fn spawn(
     if let Err(e) = spawned {
         tracing::error!(error = %e, "could not start the analysis thread");
     }
+}
+
+/// Extensions worth opening. Everything symphonia handles that anyone keeps music
+/// in; unknown extensions are skipped rather than probed, so a folder of PDFs
+/// costs nothing.
+pub const AUDIO_EXTENSIONS: &[&str] = &[
+    "mp3", "flac", "wav", "m4a", "aac", "ogg", "oga", "opus", "wv", "aiff", "aif", "alac", "mka",
+];
+
+fn is_audio(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .is_some_and(|e| AUDIO_EXTENSIONS.contains(&e.as_str()))
+}
+
+/// Every audio file under `root`, depth-first.
+///
+/// Hand-rolled rather than a `walkdir` dependency: the whole requirement is
+/// "recurse and skip what you cannot read". Unreadable directories are logged and
+/// stepped over — a permission error deep in a music folder should not abandon the
+/// scan of everything else.
+pub fn find_audio(root: &Path, out: &mut Vec<PathBuf>) {
+    let entries = match std::fs::read_dir(root) {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::warn!(dir = %root.display(), error = %e, "skipping unreadable directory");
+            return;
+        }
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        match entry.file_type() {
+            // Symlinks are not followed: a loop would hang the scan, and music
+            // folders are exactly where people put junctions to other drives.
+            Ok(t) if t.is_dir() => find_audio(&path, out),
+            Ok(t) if t.is_file() && is_audio(&path) => out.push(path),
+            _ => {}
+        }
+    }
+}
+
+/// Result of scanning one folder tree.
+#[derive(Debug, Default, PartialEq)]
+pub struct ScanReport {
+    pub found: usize,
+    pub analysed: usize,
+    pub cached: usize,
+    pub failed: usize,
+}
+
+/// Analyse a music folder into the cache (spec §13).
+///
+/// This is what makes the SMTC source useful: it reports `(title, artist)` and
+/// never a path, so it can only ever find a track the library already knows. With
+/// an empty cache every track misses and the dancer stays `Unscored` forever —
+/// correct, and useless.
+///
+/// Resumable by construction: a file already in `scores` is skipped without
+/// opening it, so an interrupted scan costs only the track it was on.
+pub fn scan(
+    roots: &[PathBuf],
+    db: Option<&Path>,
+    models: &Path,
+    progress: &mut dyn FnMut(&ScanReport, &Path),
+) -> ScanReport {
+    let mut files = Vec::new();
+    for root in roots {
+        find_audio(root, &mut files);
+    }
+    files.sort();
+    files.dedup();
+
+    let mut report = ScanReport {
+        found: files.len(),
+        ..Default::default()
+    };
+    if files.is_empty() {
+        return report;
+    }
+
+    let store = db.and_then(|p| match Store::open(p) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            tracing::error!(path = %p.display(), error = %e, "cannot open the score cache");
+            None
+        }
+    });
+
+    // Loaded lazily: a scan that turns out to be entirely cached should not pay
+    // for 10 MB of model weights.
+    let mut analyzer: Option<Analyzer> = None;
+
+    for path in &files {
+        let id = TrackId::new("file", path.to_string_lossy());
+
+        if let Some(s) = store.as_ref() {
+            if matches!(s.get_score(&id.key()), Ok(Some(_))) {
+                report.cached += 1;
+                progress(&report, path);
+                continue;
+            }
+        }
+
+        if analyzer.is_none() {
+            match Analyzer::new(models) {
+                Ok(a) => analyzer = Some(a),
+                Err(e) => {
+                    // Without models nothing further can be analysed; stop rather
+                    // than logging the same failure once per track.
+                    tracing::error!(error = %e, "cannot analyse");
+                    report.failed += files.len() - report.cached - report.analysed;
+                    return report;
+                }
+            }
+        }
+
+        let meta = TrackMeta {
+            id: id.clone(),
+            title: path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
+            artist: String::new(),
+            duration_secs: None,
+        };
+
+        match resolve(store.as_ref(), analyzer.as_mut(), &id, &meta, path) {
+            Some((_, Origin::Analyzed)) => report.analysed += 1,
+            Some((_, Origin::Cache)) => report.cached += 1,
+            None => report.failed += 1,
+        }
+        progress(&report, path);
+    }
+    report
 }
 
 #[cfg(test)]
@@ -222,6 +424,71 @@ mod tests {
             resolve(Some(&store), None, &played, &meta("song 2"), Path::new("x")).unwrap();
         assert_eq!(origin, Origin::Cache);
         assert_eq!(got.track_id, analysed.key());
+    }
+
+    #[test]
+    fn scanning_finds_audio_and_ignores_everything_else() {
+        let dir = std::env::temp_dir().join(format!("dancer-scan-{}", std::process::id()));
+        let nested = dir.join("album");
+        std::fs::create_dir_all(&nested).unwrap();
+        for name in ["a.mp3", "b.FLAC", "cover.jpg", "notes.txt"] {
+            std::fs::write(dir.join(name), b"x").unwrap();
+        }
+        std::fs::write(nested.join("c.wav"), b"x").unwrap();
+
+        let mut found = Vec::new();
+        find_audio(&dir, &mut found);
+        found.sort();
+
+        let names: Vec<String> = found
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names.len(), 3, "{names:?}");
+        assert!(names.contains(&"a.mp3".to_string()));
+        // Extension matching is case-insensitive: real libraries are a mess.
+        assert!(names.contains(&"b.FLAC".to_string()));
+        // And it recurses, because albums live in folders.
+        assert!(names.contains(&"c.wav".to_string()));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_folder_is_reported_not_fatal() {
+        let mut found = Vec::new();
+        find_audio(Path::new("definitely-not-here"), &mut found);
+        assert!(found.is_empty());
+    }
+
+    #[test]
+    fn scanning_skips_tracks_already_in_the_cache() {
+        // Resumability: an interrupted scan of a large library must not start over.
+        let dir = std::env::temp_dir().join(format!("dancer-scan2-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let track = dir.join("a.mp3");
+        std::fs::write(&track, b"x").unwrap();
+
+        let db = dir.join("scores.db");
+        {
+            let store = Store::open(&db).unwrap();
+            let id = TrackId::new("file", track.to_string_lossy());
+            let mut s = score(&id.key());
+            s.source = ScoreSource::BeatThis;
+            store.put_score(&s).unwrap();
+        }
+
+        // No models directory: if it tried to analyse, this would fail instead of
+        // reporting a cache hit.
+        let report = scan(
+            &[dir.clone()],
+            Some(&db),
+            Path::new("no-models-here"),
+            &mut |_, _| {},
+        );
+        assert_eq!(report, ScanReport { found: 1, analysed: 0, cached: 1, failed: 0 });
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -22,9 +22,11 @@ use beat_this::{beat_counts, calculate_bpm, load_audio, BeatThis, RtenRuntime};
 use dancer_score::{Score, ScoreSource, TrackId, SCHEMA};
 
 pub mod grid;
+pub mod tags;
 mod time;
 
 pub use grid::{BarGrid, ConfidenceInputs};
+pub use tags::Tags;
 
 /// What the tracker was trained at. Resampling happens in `load_audio`.
 pub const TARGET_SR: u32 = 22_050;

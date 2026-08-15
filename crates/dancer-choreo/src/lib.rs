@@ -131,6 +131,21 @@ impl Scheduler {
         self.planned_to = f64::NEG_INFINITY;
     }
 
+    /// Drop everything and schedule nothing until the next bar starts.
+    ///
+    /// Spec §10: on resume, wait for the next downbeat before resuming full moves
+    /// — "starting mid-bar looks worse than a half-second of idle". Until then
+    /// `frame_at` yields nothing and the caller falls back to the default row,
+    /// which is the settling behaviour the same section asks for.
+    pub fn resume_at_next_bar(&mut self, position: f64) {
+        self.queue.clear();
+        self.current = None;
+        self.previous_row = None;
+        // Unlike `reset`, this does *not* reach back: only bars strictly after
+        // now are planned, so the bar already in progress is skipped.
+        self.planned_to = position;
+    }
+
     /// Plan any bars starting within the lookahead window.
     ///
     /// Idempotent per bar: calling this every frame is the intended usage.
@@ -544,6 +559,26 @@ mod tests {
         assert_eq!(sch.queued(), 0);
         assert!(sch.current().is_none());
         assert!(sch.frame_at(1.0).is_none());
+    }
+
+    #[test]
+    fn resuming_waits_for_the_next_bar() {
+        // Spec §10: starting mid-bar looks worse than a half-second of idle.
+        let s = score(0.55);
+        let mut sch = sched();
+
+        // Resume partway through the bar that starts at 4.0 s.
+        sch.resume_at_next_bar(5.0);
+        sch.plan(&s, 5.0);
+        assert!(
+            sch.frame_at(5.0).is_none(),
+            "nothing should play out the bar we resumed inside"
+        );
+        let next = sch.queue.front().expect("the following bar should be planned");
+        assert!(next.target_beat >= 6.0, "target {} should be a later bar", next.target_beat);
+
+        // And it does start on that bar.
+        assert!(sch.frame_at(next.target_beat).is_some());
     }
 
     #[test]

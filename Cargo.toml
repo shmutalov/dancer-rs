@@ -29,6 +29,10 @@ raw-window-handle = "0.6"
 [workspace.dependencies.windows]
 version = "0.62"
 features = [
+    # WinRT: SMTC (spec §6.2). Phase 0.5 proved these work on the GNU toolchain.
+    "Foundation",
+    "Foundation_Collections",
+    "Media_Control",
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
     "Win32_UI_WindowsAndMessaging",

@@ -77,6 +77,13 @@ fn main() -> anyhow::Result<()> {
 
     let cfg = Config::load(&dir);
 
+    // A command, not a mode: analyse and exit. Deliberately separate from the
+    // dancer, because a library scan is minutes of work and should not be
+    // happening invisibly behind a sprite.
+    if !args.scan.is_empty() {
+        return run_scan(&args, &dir);
+    }
+
     let sheet_path = args.sheet.clone().unwrap_or_else(|| cfg.sheet_path(&dir));
     let sheet = Sheet::load(&sheet_path)
         .with_context(|| format!("loading sheet {}", sheet_path.display()))?;
@@ -104,9 +111,14 @@ fn main() -> anyhow::Result<()> {
                 id: meta.id,
                 score: Arc::new(score),
             });
-            spawn_poll(source, cfg.playback.poll_secs, tx.clone())?;
+            spawn_poll(
+                Box::new(source),
+                Duration::from_secs_f64(cfg.playback.poll_secs.clamp(0.1, 30.0)),
+                None,
+                tx.clone(),
+            )?;
         }
-        // The real path: analyse the track, or take it from the cache.
+        // Analyse a named file, or take it from the cache.
         (None, Some(audio)) => {
             let source = build_source(&args, &audio, None)?;
             let meta = source.meta().clone();
@@ -122,10 +134,41 @@ fn main() -> anyhow::Result<()> {
                 audio,
                 tx.clone(),
             );
-            spawn_poll(source, cfg.playback.poll_secs, tx.clone())?;
+            spawn_poll(
+                Box::new(source),
+                Duration::from_secs_f64(cfg.playback.poll_secs.clamp(0.1, 30.0)),
+                None,
+                tx.clone(),
+            )?;
+        }
+        // Nothing named: follow whatever the user is actually playing. This is the
+        // product's real behaviour, and the only configuration in which the M3 A/B
+        // can be judged — the dancer moves to music you can hear.
+        (None, None) if !args.no_smtc => {
+            let db = (!args.no_cache).then(|| dir.join(SCORE_DB));
+            match dancer_source::SmtcSource::new(cfg.source.allowlist.clone()) {
+                Ok(source) => {
+                    let tx2 = tx.clone();
+                    spawn_poll(
+                        Box::new(source),
+                        cfg.playback.smtc_poll_interval(),
+                        // SMTC never reports a path, only (title, artist). The
+                        // library index from M2 is the whole bridge — analysis is
+                        // impossible here because there is no file to analyse.
+                        Some(Box::new(move |meta| {
+                            library::spawn_lookup(db.clone(), meta.clone(), tx2.clone());
+                        })),
+                        tx.clone(),
+                    )?;
+                }
+                Err(e) => {
+                    // Not fatal: the dancer still dances, it just knows nothing.
+                    tracing::warn!(error = %e, "no SMTC; running Unscored");
+                }
+            }
         }
         (None, None) => {
-            tracing::info!("no --audio or --score given; running Unscored at a fixed frame rate");
+            tracing::info!("no source; running Unscored at a fixed frame rate");
         }
     }
 
@@ -165,6 +208,46 @@ fn main() -> anyhow::Result<()> {
         next_frame: Instant::now(),
     };
     event_loop.run_app(&mut app)?;
+    Ok(())
+}
+
+/// `--scan`: fill the cache so SMTC has something to recognise (spec §13).
+fn run_scan(args: &cli::Args, dir: &Path) -> anyhow::Result<()> {
+    let db = (!args.no_cache).then(|| dir.join(SCORE_DB));
+    let models = args.models.clone().unwrap_or_else(|| dir.join("models"));
+
+    println!("Scanning {} folder(s)…", args.scan.len());
+    let started = Instant::now();
+    let mut last = 0usize;
+
+    let report = library::scan(&args.scan, db.as_deref(), &models, &mut |r, path| {
+        let done = r.analysed + r.cached + r.failed;
+        // Printed rather than logged: this is a foreground command whose whole
+        // output is progress, and it can run for minutes on a real library.
+        if done != last {
+            last = done;
+            println!(
+                "  [{done}/{}] {}",
+                r.found,
+                path.file_name().unwrap_or_default().to_string_lossy()
+            );
+        }
+    });
+
+    println!(
+        "\n{} found, {} analysed, {} already cached, {} failed  ({:.0}s)",
+        report.found,
+        report.analysed,
+        report.cached,
+        report.failed,
+        started.elapsed().as_secs_f32()
+    );
+    if let Some(db) = db {
+        println!("Cache: {}", db.display());
+    }
+    if report.found == 0 {
+        println!("\nNothing to analyse. Supported: {}", library::AUDIO_EXTENSIONS.join(", "));
+    }
     Ok(())
 }
 
@@ -233,41 +316,74 @@ fn build_source(
 }
 
 /// Start the polling thread (spec §3.2's source-poll thread).
+///
+/// Owns track-change detection for every source: an adapter reports what is
+/// playing now, and noticing that "now" became a different track is this loop's
+/// job rather than each adapter's.
 fn spawn_poll(
-    mut source: FileSource,
-    poll_secs: f64,
+    mut source: Box<dyn Source>,
+    interval: Duration,
+    on_track: Option<Box<dyn Fn(&dancer_score::TrackMeta) + Send>>,
     tx: Sender<AppEvent>,
 ) -> anyhow::Result<()> {
-    let interval = Duration::from_secs_f64(poll_secs.clamp(0.1, 30.0));
-
+    let name = source.name();
     std::thread::Builder::new()
         .name("source-poll".into())
-        .spawn(move || loop {
-            match source.poll() {
-                Ok(Some(obs)) => {
-                    let msg = AppEvent::PositionReport {
-                        pos_secs: obs.position_secs(),
-                        playing: obs.playing,
-                        // Travels with the observation, so the render thread never
-                        // needs to timestamp on receipt (spec §6.1).
-                        at: obs.observed_at,
-                    };
-                    if tx.send(msg).is_err() {
-                        return; // render thread gone
+        .spawn(move || {
+            let mut current: Option<dancer_score::TrackId> = None;
+            loop {
+                match source.poll() {
+                    Ok(Some(obs)) => {
+                        if current.as_ref() != Some(&obs.track.id) {
+                            current = Some(obs.track.id.clone());
+                            if let Some(f) = on_track.as_ref() {
+                                f(&obs.track);
+                            }
+                            if tx
+                                .send(AppEvent::TrackChanged {
+                                    id: obs.track.id.clone(),
+                                    meta: obs.track.clone(),
+                                })
+                                .is_err()
+                            {
+                                return;
+                            }
+                        }
+
+                        // A session with no timeline publishes identity only
+                        // (spec §6.2). Reporting a position of zero would be a
+                        // lie the clock cannot detect, so say nothing and let the
+                        // state machine sit in Unscored.
+                        if obs.timeline {
+                            let msg = AppEvent::PositionReport {
+                                pos_secs: obs.position_secs(),
+                                playing: obs.playing,
+                                // Travels with the observation, so the render
+                                // thread never timestamps on receipt (spec §6.1).
+                                at: obs.observed_at,
+                            };
+                            if tx.send(msg).is_err() {
+                                return;
+                            }
+                        }
+                    }
+                    Ok(None) => {
+                        if current.is_some() {
+                            current = None;
+                            if tx.send(AppEvent::PlaybackStopped).is_err() {
+                                return;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(source = name, error = %e, "poll failed");
+                        if tx.send(AppEvent::SourceLost(e.to_string())).is_err() {
+                            return;
+                        }
                     }
                 }
-                Ok(None) => {
-                    if tx.send(AppEvent::PlaybackStopped).is_err() {
-                        return;
-                    }
-                }
-                Err(e) => {
-                    if tx.send(AppEvent::SourceLost(e.to_string())).is_err() {
-                        return;
-                    }
-                }
+                std::thread::sleep(interval);
             }
-            std::thread::sleep(interval);
         })?;
     Ok(())
 }

@@ -25,6 +25,11 @@ use dancer_score::TrackMeta;
 pub mod file;
 pub use file::FileSource;
 
+#[cfg(windows)]
+pub mod smtc;
+#[cfg(windows)]
+pub use smtc::SmtcSource;
+
 #[derive(Debug, thiserror::Error)]
 pub enum SourceError {
     #[error("source unavailable: {0}")]
@@ -50,6 +55,12 @@ pub struct Observation {
     /// Pairing the value with that instant makes a stale reading exact rather than
     /// wrong; pairing it with `Instant::now()` would put the dancer 87 s out.
     pub observed_at: Instant,
+    /// Whether `position` and `observed_at` mean anything.
+    ///
+    /// Some sessions publish identity but no timeline at all (spec §6.2). Encoding
+    /// that as a sentinel position would be a lie the clock cannot detect, so it is
+    /// a flag: the caller reports the track and stays `Unscored`.
+    pub timeline: bool,
 }
 
 impl Observation {

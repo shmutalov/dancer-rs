@@ -127,7 +127,7 @@ impl Playback {
             }
             AppEvent::PositionReport { pos_secs, playing, at } => {
                 let correction = self.clock.observe(pos_secs, playing, at);
-                self.on_correction(correction);
+                self.on_correction(correction, at);
             }
             AppEvent::PlaybackStopped => {
                 self.clock.freeze(Instant::now());
@@ -146,7 +146,9 @@ impl Playback {
         self.state != before
     }
 
-    fn on_correction(&mut self, c: Correction) {
+    /// `at` is the instant the observation described, not the moment it arrived —
+    /// the same pairing rule as everywhere else (spec §6.1).
+    fn on_correction(&mut self, c: Correction, at: Instant) {
         match c {
             Correction::Seek { err } => {
                 tracing::debug!(err, "seek detected");
@@ -179,10 +181,11 @@ impl Playback {
             }
             Correction::Resumed => {
                 self.agreements = 0;
+                // Spec §10: resume, then wait for the next downbeat before full
+                // moves. Deferred in M1 for want of a scheduler; reinstated here
+                // now that there is something to delay.
+                self.scheduler.resume_at_next_bar(self.clock.position(at));
                 if self.clock.is_confident() && self.state != State::Locked {
-                    // Spec §10: resume waits for the next downbeat before full
-                    // moves. With M1's single looping row there is nothing to wait
-                    // for; M3 reinstates the wait when it has moves to delay.
                     self.state = State::Locked;
                 }
             }
@@ -294,6 +297,16 @@ mod tests {
         }
     }
 
+    /// Playback locked and past the first downbeat, so moves are scheduled.
+    ///
+    /// The wait matters: spec §10 holds full moves until the next bar after a
+    /// resume, and the first position report is a resume. At 120 BPM in four,
+    /// bars are 2 s apart, so 2.5 s is comfortably inside the second one.
+    fn dancing(now: Instant) -> (Playback, Instant) {
+        let p = locked(now);
+        (p, now + Duration::from_millis(2500))
+    }
+
     fn locked(now: Instant) -> Playback {
         let mut p = Playback::new(now, 0.0, test_rows(), 0, 42);
         p.apply(AppEvent::TrackChanged {
@@ -340,15 +353,33 @@ mod tests {
     }
 
     #[test]
-    fn the_impact_cell_is_on_screen_at_the_target_beat() {
+    fn resuming_holds_moves_until_the_next_downbeat() {
+        // Spec §10, deferred in M1 and reinstated in M4 now that there are moves
+        // to hold back: starting mid-bar looks worse than a moment of idle.
         let now = Instant::now();
         let mut p = locked(now);
-        p.frame(now); // plan
+        assert!(
+            p.frame(now).is_none(),
+            "the bar in progress when playback started must not be joined mid-way"
+        );
+        assert!(
+            p.frame(now + Duration::from_millis(2100)).is_some(),
+            "but the next bar should pick up"
+        );
+        // Meanwhile the dancer is not frozen — the grid loop keeps it moving.
+        assert!(p.grid_cell(now, 4, 8).is_some());
+    }
+
+    #[test]
+    fn the_impact_cell_is_on_screen_at_the_target_beat() {
+        let (mut p, start) = dancing(Instant::now());
+        p.frame(start); // plan
 
         let m = p.current_move().cloned().expect("scheduled");
         let impact_cell = test_rows()[m.row].impact_cell;
-        // Sample at the exact target beat.
-        let at = now + Duration::from_secs_f64(m.target_beat);
+        // Sample at the exact target beat. Media time and the test's base instant
+        // coincide because the clock was anchored at 0 with no offset.
+        let at = (start - Duration::from_millis(2500)) + Duration::from_secs_f64(m.target_beat);
         let f = p.frame(at).expect("a frame at the target beat");
         assert_eq!(
             f.cell, impact_cell as usize,
@@ -361,22 +392,21 @@ mod tests {
     fn toggling_anticipation_falls_back_to_the_m1_loop() {
         // The A/B switch. With anticipation off, `frame` yields nothing and the
         // caller drives the default row off the grid, exactly as M1 did.
-        let now = Instant::now();
-        let mut p = locked(now);
-        assert!(p.frame(now).is_some());
+        let (mut p, at) = dancing(Instant::now());
+        assert!(p.frame(at).is_some());
 
         assert!(!p.toggle_anticipation());
-        assert!(p.frame(now).is_none(), "anticipation off means no scheduled frame");
-        assert!(p.grid_cell(now, 4, 8).is_some(), "but the grid loop still runs");
+        assert!(p.frame(at).is_none(), "anticipation off means no scheduled frame");
+        assert!(p.grid_cell(at, 4, 8).is_some(), "but the grid loop still runs");
 
         assert!(p.toggle_anticipation());
-        assert!(p.frame(now).is_some());
+        // Back on, the next bar resumes moves.
+        assert!(p.frame(at + Duration::from_secs(2)).is_some());
     }
 
     #[test]
     fn a_seek_discards_moves_planned_for_the_old_position() {
-        let now = Instant::now();
-        let mut p = locked(now);
+        let (mut p, now) = dancing(Instant::now());
         p.frame(now);
         assert!(p.current_move().is_some());
 

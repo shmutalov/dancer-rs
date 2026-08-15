@@ -184,6 +184,8 @@ impl FileSource {
             position: Duration::from_secs_f64(position.max(0.0)),
             playing: self.playing,
             observed_at,
+            // A simulated transport always knows where it is.
+            timeline: true,
         }
     }
 }

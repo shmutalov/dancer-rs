@@ -15,6 +15,20 @@ pub struct Config {
     pub sprite: Sprite,
     pub window: WindowCfg,
     pub playback: Playback,
+    pub source: SourceCfg,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SourceCfg {
+    /// Media sessions allowed to drive the dancer (spec §6.2).
+    ///
+    /// Empty means "whatever is playing", which is the right default: a shipped
+    /// table of English executable names would silently exclude anyone not running
+    /// an English install. Phase 0.5 found the Yandex Music desktop app
+    /// identifying as `Яндекс Музыка.exe`. The app logs every session it sees, so
+    /// this can be filled in from observation.
+    pub allowlist: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,6 +42,18 @@ pub struct Playback {
     pub offset_secs: f64,
     /// How often to ask the source where it is.
     pub poll_secs: f64,
+    /// Poll cadence for SMTC, which bounds how late a track change is noticed.
+    ///
+    /// Faster than `poll_secs` because a stale reading costs nothing here — every
+    /// SMTC reading carries its own anchor — while a late track change means
+    /// dancing to the previous song's grid.
+    pub smtc_poll_secs: f64,
+}
+
+impl Playback {
+    pub fn smtc_poll_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_secs_f64(self.smtc_poll_secs.clamp(0.05, 10.0))
+    }
 }
 
 impl Default for Playback {
@@ -37,6 +63,7 @@ impl Default for Playback {
             // values arrive with the tray UI in M5.
             offset_secs: 0.180,
             poll_secs: 2.0,
+            smtc_poll_secs: 0.5,
         }
     }
 }
@@ -72,6 +99,7 @@ impl Default for Config {
             sprite: Sprite::default(),
             window: WindowCfg::default(),
             playback: Playback::default(),
+            source: SourceCfg::default(),
         }
     }
 }

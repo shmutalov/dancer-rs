@@ -235,7 +235,7 @@ M4's value is real.
 | **M1** | Local file source + BeatClock — **done 2026-08-15** | Hand-written score JSON drives a beat-locked dance against a local WAV; no visible drift over 3 min |
 | **M2** | Real analyzer + score cache — **done 2026-08-15** | `beat-this` produces a score from a local file, cached to disk, indistinguishable in use from the hand-written one |
 | **M3** | **Anticipation scheduler** — built 2026-08-15, **A/B not yet judged** | `impact_cell` respected; A/B against M1 shows a difference visible to someone not told what changed |
-| **M4** | SMTC source | Identity, position and pause/resume from Spotify desktop; correct freeze and resume-on-downbeat |
+| **M4** | SMTC source — **done 2026-08-15** | Identity, position and pause/resume from Spotify desktop; correct freeze and resume-on-downbeat |
 | **M5** | Tray UI, config, packaging | Installable by a stranger |
 | **M6** | *Optional:* segment labels, Spotify, Yandex resolver | Only if M5 shows unlabelled pools are the visible gap |
 
@@ -485,6 +485,14 @@ person can make, and nobody has made it yet. **Middle-click toggles anticipation
 and off at runtime**, on the same track, which is the only honest way to run that
 comparison; `--no-anticipate` starts in M1 mode.
 
+**The gate is blocked on M4, not on M3.** The A/B cannot be judged yet because
+there is nothing to hear: the file source is a *simulated* transport (spec §6.5) and
+the app has no audio subsystem by design (§7). Watching a sprite move against
+silence says nothing about whether its accents land on the beat. M4 supplies the
+missing half — the user plays the track in their own player, SMTC reports position,
+and M2's library index matches it to the analysed score. **Judge M3 after M4**, with
+audible music, before building anything on top of the premise.
+
 Measured on a 124 BPM track with the default sheet:
 
 | Row | `impact_cell` | `beats_per_loop` | Predicted lead | Measured |
@@ -555,6 +563,41 @@ exists. It is a real remaining defect, not a finished item.
 **Exit:** playing an analysed local file through an ordinary player (foobar2000,
 AIMP, VLC) locks the dancer to its grid. Spotify drives identity, position and
 pause/resume correctly, with no mid-move cuts on pause, and sits in `Unscored`.
+
+#### Done 2026-08-15
+
+Reads the live session: `Rhythm Is A Dancer` / `SNAP!` from `Яндекс Музыка.exe`,
+with a **measured 2.0 ms read cost**. Resume-on-next-downbeat, deferred in M1 for
+want of a scheduler, is now implemented and tested.
+
+**It polls at 500 ms rather than subscribing, and the measurement is why.** Spec
+§6.2 asks for `MediaPropertiesChanged` and friends. The correctness argument for
+subscribing does not apply here: every reading carries its own `LastUpdatedTime`, so
+re-reading unchanged state produces a zero error and does nothing. What polling
+costs is *track-change latency*, bounded by the cadence — 2.0 ms per read at 500 ms
+is 0.4 % of one core. Subscriptions remain better and want WinRT event handlers on a
+thread with the right COM apartment, which Phase 0.5 never validated.
+
+**Two gaps found by running it, both of which made the whole path dead:**
+
+*Analysis was indexing under the filename, so nothing ever matched.* SMTC reports a
+file's own tags — spec §5.1 said exactly this and the M2 implementation ignored it,
+using the filename stem with an empty artist. `Rhythm Is A Dancer` / `SNAP!` could
+never match `01 - rhythm is a dancer` / `""`. Now reads tags with symphonia, already
+in the tree as beat-this's decoder, falling back to the filename as players do for
+untagged files.
+
+*There was no way to fill the cache.* Only `--audio <one file>` existed, so the
+library was empty and every SMTC track missed — correct behaviour, useless product.
+`--scan <DIR>` now walks a folder and analyses it, skipping anything already cached
+so an interrupted scan resumes for free.
+
+**What SMTC is and is not worth.** It gives identity, position and pause/resume for
+*everything* — that is `Unscored`, and it is genuinely better than FAOSDance, which
+never knew whether music was playing at all. It gives `Locked` only for music that
+exists as a file and has been analysed. Streaming has no file, so it stays
+`Unscored` permanently (§4.2, §8.3). That limit was set when audio capture was cut,
+and no amount of work on this adapter moves it.
 
 **Note:** streaming being unscored is the design (§4.2), not an unfinished edge.
 Surface it in the UI so it does not read as a bug.

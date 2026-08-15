@@ -9,3 +9,6 @@ license.workspace = true
 dancer-score = { path = "../dancer-score" }
 thiserror.workspace = true
 tracing.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows.workspace = true
