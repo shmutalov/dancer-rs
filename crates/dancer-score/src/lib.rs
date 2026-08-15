@@ -22,9 +22,15 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 pub mod ident;
+pub mod store;
 pub use ident::{TrackId, TrackMeta};
+pub use store::{LibraryEntry, Store, StoreError};
 
 /// Score schema version. Bump with a migration, never silently.
+///
+/// Adding an optional field with a serde default does **not** need a bump: old
+/// scores still load and the new field reads as absent, which is exactly what it
+/// was. Renaming, removing, or changing the meaning of an existing field does.
 pub const SCHEMA: u32 = 1;
 
 #[derive(Debug, thiserror::Error)]
@@ -100,6 +106,14 @@ pub struct Score {
     pub segments: Vec<Segment>,
     #[serde(default)]
     pub cues: Vec<Cue>,
+    /// Normalised RMS per beat, parallel to `beats`. Empty when unmeasured.
+    ///
+    /// Spec §5 puts `energy` on segments, but scores from §8.1 have no segments —
+    /// which is most of them. M3's move selection for unlabelled scores keys on
+    /// energy tier, so it needs a value per beat rather than per segment. Added in
+    /// M2 alongside the analyzer that can measure it.
+    #[serde(default)]
+    pub beat_energy: Vec<f32>,
 }
 
 fn default_schema() -> u32 {
@@ -198,7 +212,23 @@ impl Score {
                 self.meter
             )));
         }
+        if !self.beat_energy.is_empty() && self.beat_energy.len() != self.beats.len() {
+            return Err(ScoreError::Invalid(format!(
+                "beat_energy has {} entries for {} beats",
+                self.beat_energy.len(),
+                self.beats.len()
+            )));
+        }
         Ok(())
+    }
+
+    /// Normalised energy at `t`, from the segment if there is one and the beat
+    /// grid otherwise. `None` when nothing measured it.
+    pub fn energy_at(&self, t: f64) -> Option<f32> {
+        if let Some(seg) = self.segment_at(t) {
+            return Some(seg.energy);
+        }
+        self.beat_energy.get(self.beat_index_at(t)?).copied()
     }
 
     pub fn duration_secs(&self) -> f64 {
@@ -354,6 +384,7 @@ mod tests {
             beat_positions: positions,
             segments: vec![],
             cues: vec![],
+            beat_energy: vec![],
         }
     }
 

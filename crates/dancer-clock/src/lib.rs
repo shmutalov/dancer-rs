@@ -436,6 +436,7 @@ mod tests {
             downbeats: vec![],
             segments: vec![],
             cues: vec![],
+            beat_energy: vec![],
         };
         clock.set_score(Some(Arc::new(score.clone())));
         assert!(!clock.is_confident(), "0.5 must not reach Locked");
@@ -463,6 +464,7 @@ mod tests {
             downbeats: vec![],
             segments: vec![],
             cues: vec![],
+            beat_energy: vec![],
         };
         clock.set_score(Some(Arc::new(score)));
         clock.observe(2.25, true, t0);

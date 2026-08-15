@@ -18,6 +18,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.9"
 crossbeam-channel = "0.5"
+# `bundled` compiles SQLite from source: ~53 s once, no system dependency, and
+# no version skew across machines. Spec §5.2 for why SQLite over an embedded KV.
+rusqlite = { version = "0.40", features = ["bundled"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 winit = "0.30"

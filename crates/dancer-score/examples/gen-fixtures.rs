@@ -70,6 +70,7 @@ fn steady_120() -> Score {
         downbeats,
         segments: vec![],
         cues: vec![],
+        beat_energy: vec![],
     }
 }
 
@@ -91,6 +92,7 @@ fn waltz_90() -> Score {
         downbeats,
         segments: vec![],
         cues: vec![],
+        beat_energy: vec![],
     }
 }
 
@@ -125,6 +127,7 @@ fn drifting_128() -> Score {
         downbeats,
         segments: vec![],
         cues: vec![],
+        beat_energy: vec![],
     }
 }
 
@@ -159,5 +162,7 @@ fn labelled_124() -> Score {
             Cue { time: 106.45, kind: "build".into(), bars: 1 },
             Cue { time: 108.39, kind: "drop".into(), bars: 0 },
         ],
+        // Segments carry energy here, so per-beat values would be redundant.
+        beat_energy: vec![],
     }
 }

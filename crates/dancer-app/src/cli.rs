@@ -12,10 +12,18 @@ pub struct Args {
     pub sheet: Option<PathBuf>,
     /// Hand-written score JSON (M1). Its presence is what enables clock mode.
     pub score: Option<PathBuf>,
-    /// The audio the score describes. Optional: the file source decodes nothing,
-    /// so this only has to exist. Pass the real track when you want to play it
-    /// yourself alongside and watch the dancer against it.
+    /// The audio to dance to.
+    ///
+    /// With `--score`, this only has to exist — the file source decodes nothing,
+    /// and the flag is for pointing at the real track when you want to play it
+    /// yourself alongside. **Without** `--score` it is the track to analyse: the
+    /// cache is consulted first, and the analyser runs only on a miss.
     pub audio: Option<PathBuf>,
+    /// Directory holding the ONNX weights. Defaults to `models/` in the data
+    /// directory. Not bundled — see `dancer_analyze::AnalyzeError::ModelsMissing`.
+    pub models: Option<PathBuf>,
+    /// Skip the score cache entirely: always re-analyse, never write.
+    pub no_cache: bool,
     /// Run the simulated transport off nominal speed, to give the clock real drift
     /// to absorb. Dev lever for exercising spec §9.1.
     pub rate: Option<f64>,
@@ -26,8 +34,10 @@ pub struct Args {
 pub const USAGE: &str = "\
 dancer-rs [SHEET.png] [options]
 
-  --score <FILE.json>   Beat grid to dance to (M1: hand-written)
-  --audio <FILE>        Track the score describes; defaults to the score's path
+  --audio <FILE>        Track to analyse and dance to (cached after the first run)
+  --score <FILE.json>   Use this beat grid instead of analysing
+  --models <DIR>        ONNX weights directory (default: <data dir>/models)
+  --no-cache            Always re-analyse; do not read or write scores.db
   --rate <F>            Simulated transport speed, 1.0 nominal
   --stale <SECS>        Report positions this many seconds old
   -h, --help            This text
@@ -45,6 +55,8 @@ pub fn parse<I: Iterator<Item = String>>(args: I) -> Result<Args, String> {
             "-h" | "--help" => return Err(USAGE.into()),
             "--score" => out.score = Some(PathBuf::from(value("--score")?)),
             "--audio" => out.audio = Some(PathBuf::from(value("--audio")?)),
+            "--models" => out.models = Some(PathBuf::from(value("--models")?)),
+            "--no-cache" => out.no_cache = true,
             "--rate" => {
                 let v = value("--rate")?;
                 out.rate = Some(v.parse().map_err(|_| format!("--rate: {v} is not a number"))?);
@@ -87,6 +99,15 @@ mod tests {
         assert_eq!(a.score, Some(PathBuf::from("s.json")));
         assert_eq!(a.rate, Some(1.01));
         assert_eq!(a.staleness, Some(Duration::from_millis(2500)));
+    }
+
+    #[test]
+    fn analysis_flags_parse() {
+        let a = parse_str("--audio track.mp3 --models m --no-cache").unwrap();
+        assert_eq!(a.audio, Some(PathBuf::from("track.mp3")));
+        assert_eq!(a.models, Some(PathBuf::from("m")));
+        assert!(a.no_cache);
+        assert!(a.score.is_none(), "audio alone means analyse");
     }
 
     #[test]

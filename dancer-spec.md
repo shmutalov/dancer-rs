@@ -235,12 +235,28 @@ Field notes:
 - **`segments` may be empty**, and is whenever the score came from §8.1 alone.
   Everything downstream must tolerate that — see §11.3.
 - `energy` is normalised RMS, computed over the segment where segments exist and
-  over the beat grid otherwise.
+  over the beat grid otherwise. The beat-grid form is a separate field,
+  `beat_energy`, parallel to `beats` and empty when unmeasured — segments are
+  absent from most scores, so energy could not live only on them. Normalised
+  against the 95th percentile, not the maximum: one clipped transient would
+  otherwise flatten every other beat into the floor.
 - `cues` are derived, not from allin1: `build` is emitted for the last bar before a
   segment boundary where energy rises by more than a threshold; `drop` is the
   boundary itself. These drive anticipation moves. Without segments, derive
   boundaries from novelty on the beat grid.
-- `confidence` gates entry into the `Locked` state. Below ~0.6, stay reactive.
+- `confidence` gates entry into the `Locked` state. Below 0.6, stay `Unscored`.
+  **It is a heuristic over proxies, not a measurement** (M2): nothing at runtime
+  knows whether the beats are in the right places. It scores coverage — a grid over
+  half a track is wrong for the other half — and self-consistency, which together
+  catch a partial or incoherent detection presented as solid. Inter-beat deviation
+  is weighted lightly on purpose: Phase 0.1's waltz measured 12.5 % with a good
+  grid, and since frame timing comes from local intervals (§11.1), expressive
+  timing costs nothing.
+- **`bpm` is a label, not a clock.** M2 measured `calculate_bpm` reporting 125.0 on
+  a track whose true tempo was 124.0, while the beat *count* was exactly right.
+  Deriving frame timing from this field would drift a beat every two minutes on a
+  grid that was never wrong. Use it for display and for sanity checks; use `beats`
+  for everything that has to land on time.
 
 ### 5.1 Cache
 

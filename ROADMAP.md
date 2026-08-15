@@ -233,7 +233,7 @@ M4's value is real.
 |---|---|---|
 | **M0** | Window + sprite playback — **done 2026-08-15** | FAOSDance parity: loads an existing sheet + `.txt`, fixed-fps loop, transparent, click-through, draggable |
 | **M1** | Local file source + BeatClock — **done 2026-08-15** | Hand-written score JSON drives a beat-locked dance against a local WAV; no visible drift over 3 min |
-| **M2** | Real analyzer + score cache | `beat-this` produces a score from a local file, cached to disk, indistinguishable in use from the hand-written one |
+| **M2** | Real analyzer + score cache — **done 2026-08-15** | `beat-this` produces a score from a local file, cached to disk, indistinguishable in use from the hand-written one |
 | **M3** | **Anticipation scheduler** | `impact_cell` respected; A/B against M1 shows a difference visible to someone not told what changed |
 | **M4** | SMTC source | Identity, position and pause/resume from Spotify desktop; correct freeze and resume-on-downbeat |
 | **M5** | Tray UI, config, packaging | Installable by a stranger |
@@ -408,6 +408,42 @@ phase queries, as spec §9 sketches it.
 - Run analysis off-thread; `ScoreReady` arrives as an `AppEvent`.
 
 **Exit:** a real analysed score drives the dance as convincingly as M1's fixture.
+
+#### Done 2026-08-15
+
+End to end on a 90 s 124 BPM test track: analysed in **2.4 s (37× realtime)**, 186
+beats, meter 4, confidence 0.998, `Idle → Identifying → Locked`. Second run hit the
+cache and reached `Locked` with no model load at all. `scores.db` is 20 KB for one
+score, `user_version = 1`, both tables populated.
+
+**`calculate_bpm` reported 125.0 against a true 124.0** — and the beat *count* was
+exactly right (186 beats is what 124 BPM gives over 90 s). So the grid was correct
+while the summary tempo was 0.8 % out. This is spec §11.1 demonstrated rather than
+argued: anything deriving frame timing from `bpm` would have drifted a beat every
+two minutes on a grid that was never wrong. `bpm` is a label, not a clock.
+
+**The bar phase is fitted, not trusted.** `fit_bar_phase` scores every phase
+`0..meter` by how many downbeat candidates it explains and takes the winner, so
+Phase 0.1's spurious downbeats lose a vote instead of halving bars. Tested against
+that exact failure, and against a pickup bar where the track does not start on a
+downbeat.
+
+**Confidence is a heuristic over proxies, and says so.** Nothing at runtime knows
+whether the beats are in the right places. What it can check is coverage and
+self-consistency, which catch the failure that matters — a partial detection
+presented as solid. Weighting came from Phase 0.1: inter-beat deviation counts for
+little, because the waltz measured 12.5 % and its grid was good, and the clock reads
+local intervals anyway. Tests pin both Phase 0.1 tracks against the 0.6 gate.
+
+**`beat_energy` was added to the score.** Spec §5 puts energy on segments, but
+scores from §8.1 have none — which is most of them — and M3's move selection for
+unlabelled scores keys on energy tier. Per-beat RMS, normalised against the 95th
+percentile so one clipped transient cannot flatten everything else into the floor.
+Writing the test for that found the percentile index rounding up to the maximum on
+short tracks, which made it its own normaliser; capped at `n-2`.
+
+**Cues are still empty.** Deriving `build`/`drop` from novelty on the beat grid
+belongs with the scheduler that consumes them (M3), not here.
 
 **Risk:** `beat-this` quality (settled in Phase 0.1). Analysis wall-time should
 finish well before a typical track does — measure it.

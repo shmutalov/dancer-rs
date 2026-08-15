@@ -200,6 +200,7 @@ mod tests {
             beats,
             segments: vec![],
             cues: vec![],
+            beat_energy: vec![],
         })
     }
 

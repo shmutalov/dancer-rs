@@ -70,6 +70,19 @@ impl FileSource {
         }
     }
 
+    /// A transport for a file whose length is not known yet.
+    ///
+    /// The analyzer learns the duration by decoding, which happens off-thread and
+    /// finishes after playback has already started (ROADMAP M2). Rather than guess,
+    /// the transport reports no duration and does not loop — a wrong duration would
+    /// reach the library index, where it gates cache hits (spec §5.1).
+    pub fn with_unknown_duration(path: impl AsRef<Path>, now: Instant) -> Self {
+        let mut s = Self::new(path, f64::INFINITY, now);
+        s.meta.duration_secs = None;
+        s.looping = false;
+        s
+    }
+
     /// Report every reading as this old, as a stale SMTC session does.
     pub fn with_staleness(mut self, staleness: Duration) -> Self {
         self.staleness = staleness;

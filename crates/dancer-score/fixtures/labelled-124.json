@@ -764,5 +764,6 @@
       "kind": "drop",
       "bars": 0
     }
-  ]
+  ],
+  "beat_energy": []
 }

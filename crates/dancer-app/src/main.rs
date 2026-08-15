@@ -11,7 +11,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -36,7 +36,11 @@ use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 mod cli;
 mod config;
 mod events;
+mod library;
 mod playback;
+
+/// The score cache, beside the executable (spec §5.1, §13).
+const SCORE_DB: &str = "scores.db";
 
 use config::{data_dir, Config};
 use events::AppEvent;
@@ -79,14 +83,50 @@ fn main() -> anyhow::Result<()> {
 
     let (tx, rx) = crossbeam_channel::unbounded();
 
-    // Without a score the app is exactly M0: a sheet looping at a fixed rate. That
-    // is the honest `Unscored` behaviour (spec §10), not a degraded mode.
-    if let Some(score_path) = args.score.clone() {
-        let score = Score::load(&score_path)
-            .with_context(|| format!("loading score {}", score_path.display()))?;
-        spawn_source(&args, score, score_path, cfg.playback.poll_secs, tx.clone())?;
-    } else {
-        tracing::info!("no --score given; running Unscored at a fixed frame rate");
+    // Three ways to get a grid, in order of directness. Without any of them the
+    // app is exactly M0: a sheet looping at a fixed rate. That is the honest
+    // `Unscored` behaviour (spec §10), not a degraded mode.
+    match (args.score.clone(), args.audio.clone()) {
+        // A hand-written grid, paired with whatever file was named. M1's path,
+        // and still how the clock is tested against a known-correct grid.
+        (Some(score_path), _) => {
+            let score = Score::load(&score_path)
+                .with_context(|| format!("loading score {}", score_path.display()))?;
+            let audio = args.audio.clone().unwrap_or_else(|| score_path.clone());
+            let duration = score.duration_secs();
+            let source = build_source(&args, &audio, Some(duration))?;
+            let meta = source.meta().clone();
+            let _ = tx.send(AppEvent::TrackChanged {
+                id: meta.id.clone(),
+                meta: meta.clone(),
+            });
+            let _ = tx.send(AppEvent::ScoreReady {
+                id: meta.id,
+                score: Arc::new(score),
+            });
+            spawn_poll(source, cfg.playback.poll_secs, tx.clone())?;
+        }
+        // The real path: analyse the track, or take it from the cache.
+        (None, Some(audio)) => {
+            let source = build_source(&args, &audio, None)?;
+            let meta = source.meta().clone();
+            let _ = tx.send(AppEvent::TrackChanged {
+                id: meta.id.clone(),
+                meta: meta.clone(),
+            });
+            library::spawn(
+                (!args.no_cache).then(|| dir.join(SCORE_DB)),
+                args.models.clone().unwrap_or_else(|| dir.join("models")),
+                meta.id.clone(),
+                meta,
+                audio,
+                tx.clone(),
+            );
+            spawn_poll(source, cfg.playback.poll_secs, tx.clone())?;
+        }
+        (None, None) => {
+            tracing::info!("no --audio or --score given; running Unscored at a fixed frame rate");
+        }
     }
 
     let event_loop = EventLoop::new()?;
@@ -112,21 +152,19 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Start the polling thread (spec §3.2's source-poll thread).
-fn spawn_source(
+/// Build the simulated transport (spec §6.5).
+fn build_source(
     args: &cli::Args,
-    score: Score,
-    score_path: PathBuf,
-    poll_secs: f64,
-    tx: Sender<AppEvent>,
-) -> anyhow::Result<()> {
-    // The file source decodes nothing, so any existing path satisfies it. The
-    // score's own path is the sensible default; --audio is for pointing at the
-    // real track when you want to play it yourself and watch the dancer against it.
-    let audio = args.audio.clone().unwrap_or(score_path);
+    audio: &Path,
+    duration: Option<f64>,
+) -> anyhow::Result<FileSource> {
     let now = Instant::now();
-
-    let mut source = FileSource::new(&audio, score.duration_secs(), now);
+    let mut source = match duration {
+        Some(d) => FileSource::new(audio, d, now),
+        // Length arrives with the analysis, off-thread and after playback has
+        // started. Guessing it would poison the library index (spec §5.1).
+        None => FileSource::with_unknown_duration(audio, now),
+    };
     if let Some(rate) = args.rate {
         source = source.with_rate(rate);
     }
@@ -137,32 +175,24 @@ fn spawn_source(
         anyhow::bail!("{} does not exist", audio.display());
     }
 
-    let meta = source.meta().clone();
-    let score = Arc::new(score);
-    let interval = Duration::from_secs_f64(poll_secs.clamp(0.1, 30.0));
-
     tracing::info!(
         audio = %audio.display(),
-        track = %meta.id,
-        duration = score.duration_secs(),
-        bpm = score.bpm,
-        meter = score.meter,
-        poll_secs = interval.as_secs_f64(),
+        track = %source.meta().id,
+        duration = ?duration,
         rate = args.rate.unwrap_or(1.0),
         stale_secs = args.staleness.unwrap_or_default().as_secs_f64(),
         "file source"
     );
+    Ok(source)
+}
 
-    // M1 pairs the score with the track directly. M2 replaces this with the
-    // SQLite lookup: `library` by (title, artist) hash, then `scores` by id.
-    let _ = tx.send(AppEvent::TrackChanged {
-        id: meta.id.clone(),
-        meta: meta.clone(),
-    });
-    let _ = tx.send(AppEvent::ScoreReady {
-        id: meta.id.clone(),
-        score,
-    });
+/// Start the polling thread (spec §3.2's source-poll thread).
+fn spawn_poll(
+    mut source: FileSource,
+    poll_secs: f64,
+    tx: Sender<AppEvent>,
+) -> anyhow::Result<()> {
+    let interval = Duration::from_secs_f64(poll_secs.clamp(0.1, 30.0));
 
     std::thread::Builder::new()
         .name("source-poll".into())
