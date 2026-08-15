@@ -667,8 +667,11 @@ early, which reads as the dancer stumbling.
 
 - `winit` 0.30+ for the window: `with_transparent(true)`, `with_decorations(false)`,
   `WindowLevel::AlwaysOnTop`.
-- Click-through is `WS_EX_TRANSPARENT`, implementing the FAOSDance "solid" toggle —
-  clicks pass through to whatever is behind. Toggled off while dragging.
+- Click-through is `WS_EX_TRANSPARENT`: clicks pass through to whatever is behind.
+  Toggled off while dragging. This *improves on* the FAOSDance "solid" toggle
+  rather than reimplementing it — upstream has no `WS_EX_TRANSPARENT`, no window
+  shape and no JNA, so `solid` merely gates its own mouse handlers and the window
+  still swallows every click.
 - **`UpdateLayeredWindow` via the `windows` crate for presentation.** Not
   `softbuffer`: its pixel format is documented as
   `00000000RRRRRRRRGGGGGGGGBBBBBBBB` — top 8 bits zero, no alpha channel — and its
