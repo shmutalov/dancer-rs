@@ -667,14 +667,21 @@ early, which reads as the dancer stumbling.
 
 - `winit` 0.30+ for the window: `with_transparent(true)`, `with_decorations(false)`,
   `WindowLevel::AlwaysOnTop`.
-- `set_cursor_hittest(false)` implements the FAOSDance "solid" toggle — clicks pass
-  through to whatever is behind.
-- `softbuffer` for CPU blitting. A sprite dancer does not need `wgpu`; the entire
-  frame is one alpha-blended bitmap copy. Revisit only if effects are added.
-- `image` for PNG decode; pre-slice cells into an `Arc<[RgbaImage]>` at load.
-- Per-pixel alpha on Windows needs a layered window (`WS_EX_LAYERED`). Verify
-  winit's transparency path gives real per-pixel alpha and not colour-keying; if
-  not, drop to `UpdateLayeredWindow` via the `windows` crate.
+- Click-through is `WS_EX_TRANSPARENT`, implementing the FAOSDance "solid" toggle —
+  clicks pass through to whatever is behind. Toggled off while dragging.
+- **`UpdateLayeredWindow` via the `windows` crate for presentation.** Not
+  `softbuffer`: its pixel format is documented as
+  `00000000RRRRRRRRGGGGGGGGBBBBBBBB` — top 8 bits zero, no alpha channel — and its
+  Win32 backend blits with `SRCCOPY`. It cannot express per-pixel alpha at all.
+  Measured in Phase 0.2; see `spikes/alpha-probe`.
+- A sprite dancer still does not need `wgpu`. The layered path costs 0.066–0.112 ms
+  per frame at 128–512 px, under 1% of a 60 Hz budget.
+- Presentation replaces the whole window surface, so there is no `WM_PAINT` and
+  winit's redraw path goes unused. The loop is: build a premultiplied BGRA DIB,
+  call `UpdateLayeredWindow`.
+- `image` for PNG decode; pre-slice cells into an `Arc<[RgbaImage]>` at load,
+  **premultiplied** — the present path requires it, so per-frame conversion is
+  pure waste.
 - Additional extended styles: `WS_EX_TOOLWINDOW` (keep out of Alt-Tab and taskbar),
   `WS_EX_NOACTIVATE` (never steal focus).
 - Dragging: while `set_cursor_hittest(true)`, mouse-down switches to the `Held` row
@@ -765,9 +772,8 @@ plumbing to feed it.
 | Crate | Purpose |
 |---|---|
 | `winit` | Windowing, event loop, cursor hit-test |
-| `softbuffer` | CPU framebuffer presentation |
 | `image` | PNG decode |
-| `windows` | SMTC, WASAPI, layered window styles |
+| `windows` | SMTC, WASAPI, `UpdateLayeredWindow` presentation and window styles |
 | `wasapi` | Loopback capture (verify per-process support) |
 | `beat-this` | Beat + downbeat tracking (§8.1) |
 | `rten` | ML runtime backing `beat-this`; `ort` behind a feature flag for cross-check |
@@ -797,7 +803,8 @@ plumbing to feed it.
 | GNU toolchain vs MSVC | WinRT/WASAPI less travelled on GNU; `ort` fallback awkward | Unaffected through M3. Switch to `stable-msvc` before M4 |
 | No functional segmentation available | Pools can't key on section labels | Energy-tier selection (§11.3); labels are enrichment, not timing. Optional sidecar in M8 |
 | NATTEN build on Windows | Optional segment labels unavailable | No longer blocks the product (§8.2). Ship without labels |
-| winit gives colour-keying, not per-pixel alpha | Sprite edges look wrong | Settle in Phase 0; fall back to `UpdateLayeredWindow` before M0 rather than retrofitting |
+| ~~winit gives colour-keying, not per-pixel alpha~~ | — | **Retired.** Phase 0.2 measured the `UpdateLayeredWindow` path exact to ±1 across an alpha ramp. `softbuffer` dropped: it has no alpha channel |
+| Per-process loopback needs build 20348+ | Preferred capture path untestable locally | Dev machine is Windows 10 build 19044, below the floor. Full-mix fallback must work and be tested; validate per-process on a Win11 box before M5 exits |
 | Yandex internal API changes | ID resolution breaks | Feature flag; SMTC still supplies position and identity, degraded to hashed strings |
 | Recording legality / ToS | Feature must ship disabled | Off by default, explicit opt-in, local-only, WAV deleted after analysis |
 | Track download endpoints used for analysis | Substantially worse ToS exposure than §7.3 | Keep `dancer-source` structurally unable to reach them (§6.4) |

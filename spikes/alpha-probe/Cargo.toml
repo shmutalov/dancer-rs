@@ -1,0 +1,10 @@
+[package]
+name = "alpha-probe"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+raw-window-handle = "0.6.2"
+softbuffer = "0.4.8"
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging"] }
+winit = "0.30.13"

@@ -96,14 +96,33 @@ against ground truth. Widen the corpus if M3 shows scheduling problems that trac
 back to the grid. The upstream port is also AI-assisted per its own README, with CI
 and claimed parity tests — the reason this spike existed.
 
-### 0.2 winit per-pixel alpha
+### 0.2 Per-pixel alpha — **DONE 2026-08-15: softbuffer dropped, layered path passes**
 
-Confirm that `with_transparent(true)` yields true per-pixel alpha on Windows 11 and
-not colour-keying (spec §12 flags this as unverified).
+Harness and full results: [spikes/alpha-probe](spikes/alpha-probe/README.md).
 
-- **Pass:** proceed with `winit` + `softbuffer`.
-- **Fail:** commit to `UpdateLayeredWindow` via the `windows` crate now, rather than
-  retrofitting it after M0 has been built against the wrong assumption.
+The question was framed as "does winit's transparency path give per-pixel alpha".
+It turned out to be the wrong layer. **`softbuffer` cannot express alpha at all**:
+its documented pixel format is `00000000RRRRRRRRGGGGGGGGBBBBBBBB`, top 8 bits
+specified as zero, and its Win32 backend presents with `BitBlt(SRCCOPY)`, an opaque
+copy. No winit setting routes around that.
+
+**winit + `UpdateLayeredWindow` passes cleanly** — worst channel delta of 1 across
+a five-step alpha ramp measured against screen captures, with all four extended
+styles (`LAYERED`, `TOOLWINDOW`, `NOACTIVATE`, `TRANSPARENT`) applied on a
+winit-created window. Present cost is 0.066–0.112 ms/frame at 128–512 px, i.e.
+0.4–0.7% of a 16.7 ms budget, so the per-frame GDI blit is a non-issue.
+
+Consequences, folded into M0:
+
+- Drop `softbuffer` (spec §12, §15).
+- Premultiply sprite cells at load — `UpdateLayeredWindow` requires premultiplied
+  BGRA, so doing it per frame would be waste.
+- Presentation is not `WM_PAINT`. The call replaces the whole window surface and
+  winit's redraw path goes unused.
+- Click-through is `WS_EX_TRANSPARENT`, toggled off for dragging.
+
+Caveat: one machine, Windows 10 build 19044. Re-check on Windows 11 and on a
+high-DPI multi-monitor setup before calling M0 done.
 
 ### 0.3 Housekeeping — **DONE 2026-08-15**
 
@@ -120,8 +139,9 @@ Visual Studio C++ toolset is installed (`vswhere` finds no product with
 This did not matter for 0.1 — the analyzer path is pure Rust and built clean. It
 may matter later, because MSVC is the primary target for Windows-native work:
 
-- **M0–M3** are unaffected. `winit`, `softbuffer`, `image`, `beat-this` are all
-  fine on GNU.
+- **M0–M3** are unaffected. `winit`, `image`, `beat-this` all build and run on GNU,
+  and Phase 0.2 exercised `UpdateLayeredWindow` through the `windows` crate on it
+  successfully — so even the Win32 presentation path is proven on this ABI.
 - **M4+** is the risk. The `windows` crate supports both ABIs, but WinRT (SMTC) and
   WASAPI are better travelled on MSVC.
 - **The `ort` fallback** from 0.1 would be awkward on GNU: prebuilt
@@ -159,16 +179,19 @@ wrong ABI. Recommend switching before M4 rather than at it.
   Reference: `SpriteSheet.kt` upstream is 64 lines; this is not a port.
 - Optional `.toml` manifest (spec §4.2) parsed but only `cell_width`/`cell_height`/
   `default_row` consumed for now.
-- Pre-slice cells into `Arc<[RgbaImage]>` at load.
-- Window: transparent, undecorated, always-on-top, `WS_EX_TOOLWINDOW`,
-  `WS_EX_NOACTIVATE`.
-- `set_cursor_hittest(false)` click-through toggle; drag switches to `Held` row and
-  bypasses everything else.
+- Pre-slice cells into `Arc<[RgbaImage]>` at load, **premultiplied** — the present
+  path requires premultiplied BGRA (Phase 0.2).
+- Window: winit for creation, events, DPI and monitors; `UpdateLayeredWindow` for
+  presentation. No `softbuffer`, no `WM_PAINT`.
+- Extended styles: `WS_EX_LAYERED`, `WS_EX_TOOLWINDOW`, `WS_EX_NOACTIVATE`,
+  `WS_EX_TRANSPARENT`. All four verified applying on a winit window in Phase 0.2.
+- Click-through toggle flips `WS_EX_TRANSPARENT`; drag switches to the `Held` row
+  and bypasses everything else.
 - Persist position as (monitor id, normalised x/y), not absolute pixels.
+- Re-check alpha and DPI on Windows 11 and a multi-monitor setup before calling
+  this done — Phase 0.2 ran on one machine.
 
 **Exit:** an existing FAOSDance sheet loads and loops, transparent and draggable.
-
-**Risk:** per-pixel alpha (settled in Phase 0.2).
 
 ---
 
