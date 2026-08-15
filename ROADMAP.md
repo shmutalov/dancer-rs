@@ -17,15 +17,16 @@ removes something the original spec assumed was necessary.
 | Concern | Decision | Rationale |
 |---|---|---|
 | Primary language | **Rust, end to end** | Every layer has a first-class crate; Python survives only as an optional extra |
-| Windows 10 | **First-class, not degraded** | Large share of the install base. No feature may require a Win11-only API. The binding constraint is per-process audio capture (build 20348+), which no retail Win10 build has — so full-mix capture is the shipping path and per-process is an enhancement |
+| Windows 10 | **First-class, not degraded** | Large share of the install base. No feature may require a Win11-only API. Applying that rule is what removed the audio subsystem — see §4.1 |
+| Audio capture | **Cut from v1** | No WASAPI, no loopback, no recording, no `dancer-audio`. Every purpose it served either dissolved or has a cheaper answer. Costs streaming support; see §4.1 |
 | Beat + downbeat tracking | **`beat-this`** (rten backend) | Rust port of the ISMIR 2024 tracker; reports verified F-measure parity with the PyTorch reference. Emits beats, downbeats and beat numbers — maps 1:1 onto the score format |
 | ML runtime | **`rten`**, with `ort` as cross-check | Ships inside `beat-this`. Do not add a second framework |
 | GGUF / `candle` | **Rejected** | GGUF is a ggml container for quantized LLMs; no MIR model is published in it. `candle` is capable but redundant when `rten` is already in the tree |
 | Source separation (Demucs) | **Not used** | Rust ports exist (`demucs-rs`, `charon-audio`), but a per-track stem separation pass is a large cost for section *names* |
-| Functional segmentation | **Deferred to M8** | No trustworthy Rust option. `oximedia-mir` advertises it but its breadth-to-adoption ratio does not survive scrutiny. Derive boundaries from novelty + RMS instead |
-| Python `allin1` sidecar | **Optional, off the critical path** | Was the primary analysis path in spec §8.1. Now an M8 enrichment supplying segment labels only |
+| Functional segmentation | **Deferred to M6** | No trustworthy Rust option. `oximedia-mir` advertises it but its breadth-to-adoption ratio does not survive scrutiny. Derive boundaries from novelty + RMS instead |
+| Python `allin1` sidecar | **Optional, off the critical path** | Was the primary analysis path in spec §8.1. Now an M6 enrichment supplying segment labels only |
 | Yandex integration | **`yandex-music`** (vyfor) as an ID resolver | Mature: 0.7.0, ~15K downloads, maintained since June 2024. REST-only, so it cannot serve as a `Source` — see §5.8 |
-| Yandex realtime (`yamuse`) | **Open — decide at M8** | Has the ynison WebSocket that vyfor's lacks. If ynison is needed, the crate changes; the two are not interchangeable behind a flag. See §5.8 and §6.6 |
+| Yandex realtime (`yamuse`) | **Open — decide at M6** | Has the ynison WebSocket that vyfor's lacks. If ynison is needed, the crate changes; the two are not interchangeable behind a flag. See §5.8 and §6.6 |
 
 ### 1.1 What these decisions delete
 
@@ -89,7 +90,7 @@ Three findings that change the design:
    bars. Since §11.3 changes moves on downbeats only, the scheduler must fit bar
    phase to the downbeat *candidates* rather than trust each one. Added to M3.
 3. **Model weights are not bundled** in the published crate. ~270 KB mel front end
-   plus ~10 MB small model (or ~83 MB full) must ship with the app. Added to M7.
+   plus ~10 MB small model (or ~83 MB full) must ship with the app. Added to M5.
 
 Remaining caveats: four tracks, no independent annotations, small model rather than
 the full-accuracy one. This establishes plausibility and stability, not accuracy
@@ -143,8 +144,9 @@ may matter later, because MSVC is the primary target for Windows-native work:
 - **M0–M3** are unaffected. `winit`, `image`, `beat-this` all build and run on GNU,
   and Phase 0.2 exercised `UpdateLayeredWindow` through the `windows` crate on it
   successfully — so even the Win32 presentation path is proven on this ABI.
-- **M4+** is the risk. The `windows` crate supports both ABIs, but WinRT (SMTC) and
-  WASAPI are better travelled on MSVC.
+- **M4+** is the risk. The `windows` crate supports both ABIs, but WinRT (SMTC) is
+  better travelled on MSVC. Smaller now that WASAPI is gone (§4.1), but SMTC is the
+  one remaining WinRT surface and it is M4's whole content.
 - **The `ort` fallback** from 0.1 would be awkward on GNU: prebuilt
   `libonnxruntime` binaries are MSVC-built. Only relevant if we ever leave `rten`.
 
@@ -163,10 +165,39 @@ wrong ABI. Recommend switching before M4 rather than at it.
 | **M2** | Real analyzer + score cache | `beat-this` produces a score from a local file, cached to disk, indistinguishable in use from the hand-written one |
 | **M3** | **Anticipation scheduler** | `impact_cell` respected; A/B against M1 shows a difference visible to someone not told what changed |
 | **M4** | SMTC source | Identity, position and pause/resume from Spotify desktop; correct freeze and resume-on-downbeat |
-| **M5** | WASAPI loopback | Per-process capture, silence watchdog, offset calibration producing a stable measured value |
-| **M6** | Learn-on-second-listen | Unknown streamed track: reactive on play 1, locked on play 2 |
-| **M7** | Tray UI, config, packaging | Installable by a stranger |
-| **M8** | *Optional:* segmentation, Spotify, Yandex resolver | Only if M7 shows label-driven pools are the visible gap |
+| **M5** | Tray UI, config, packaging | Installable by a stranger |
+| **M6** | *Optional:* segment labels, Spotify, Yandex resolver | Only if M5 shows unlabelled pools are the visible gap |
+
+Two milestones were cut, not renamed. The old M5 (WASAPI loopback) and M6
+(learn-on-second-listen) are gone with the audio subsystem — see §4.1.
+
+### 4.1 What cutting audio removed, and what it cost
+
+Capture was never the sync mechanism — spec §7 said so in its own first line, but
+the design had not followed the sentence to its conclusion. Grids come from
+offline analysis, position comes from the source adapters. The four purposes
+capture served each dissolved:
+
+| Purpose | Resolution |
+|---|---|
+| Silence watchdog | Guards a narrow class SMTC already reports, and on a full mix fails toward false *non*-silence — least reliable where most needed |
+| Offset calibration | Real value, but a manual nudge reaches it. Sync error is highly perceptible, so users trim by eye in seconds, once per source app |
+| Recording for analysis | Opt-in, off by default, prohibited by streaming ToS, and corrupt on a contaminated mix |
+| Reactive fallback | Needed live DSP. Replaced by `Unscored`: default row, fixed fps, honest about knowing nothing |
+
+The decisive factor was per-process capture, which was the mitigation for every
+contamination problem and needs build 20348+ — Windows Server 2022's number. Retail
+Windows 10 ends at 19045, so no consumer Win10 build has it. With Windows 10
+first-class, that left a whole subsystem whose best case was "sometimes less wrong".
+
+**Deleted:** the `dancer-audio` crate, two milestones, the `wasapi` and `realfft`
+dependencies, the recording legal exposure, the `Reactive` and `Recording` states,
+and the entire contaminated-mix design problem.
+
+**Cost:** streamed unknown tracks get no grid — absent, not degraded. Local files
+are unaffected and remain the primary path. Spotify and Yandex know identity and
+position but have nothing to dance to, until the shared score cache (spec §17.4)
+exists.
 
 ---
 
@@ -295,71 +326,16 @@ with no mid-move cuts on pause.
 
 ---
 
-### M5 — WASAPI loopback
-
-**Crate:** `dancer-audio`
-
-- `wasapi` crate; verify loopback support against the current version.
-- **Build full-mix first and treat it as the shipping path.** Per-process capture
-  needs build 20348+, which no retail Windows 10 has (19045 is the last), so it is
-  a Windows 11 enhancement — detect and use it opportunistically, never require it.
-  Since the dev machine is 19044, full-mix is what gets exercised by default, which
-  is the right way round.
-- Per-process, when available: `ActivateAudioInterfaceAsync` with
-  `PROCESS_LOOPBACK` + `PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE`,
-  resolving the PID from the SMTC session.
-- 44.1 kHz mono f32; 1024-sample window, 512 hop; `realfft` spectral flux.
-- **Bandpass to the low band before onset detection.** On a full mix this is what
-  separates kick drums from notification chimes.
-- Silence watchdog: RMS below floor for >300 ms while nominally playing → freeze.
-  Corroborate with SMTC playback state — on a contaminated mix the failure mode is
-  false *non*-silence, so the watchdog cannot be the sole authority.
-- Offset calibration: cross-correlate live onsets against the score's beat grid,
-  store per `SourceAppUserModelId`. Discard runs with a weak correlation peak
-  rather than storing a bad offset. Expose a manual nudge.
-
-**Exit:** full-mix capture works on Windows 10 with the watchdog firing correctly
-and calibration producing a stable repeatable value. Per-process validated
-separately on a Windows 11 box, as an enhancement rather than a gate.
-
----
-
-### M6 — Learn-on-second-listen
-
-**Crates:** `dancer-audio` (recorder), `dancer-analyze`
-
-Per spec §8.3. Recording ships **disabled by default**, is disclosed in the UI, and
-is user-enabled.
-
-- Streaming WAV writer for unknown tracks.
-- Discard on seek, skip, or a pause beyond a few seconds — a discontinuous capture
-  yields a corrupt grid, and a confidently wrong grid is worse than none.
-- On clean completion: analyse, cache under the track ID, delete the WAV.
-
-**Exit:** an unknown streamed track is reactive on play 1 and locked on play 2.
-
-**Windows 10 makes this harder.** Without per-process capture (§M5), the recording
-is the full system mix, so a Discord ping or a notification lands in the WAV and can
-corrupt the derived grid — and §8.3's own principle is that a confidently wrong grid
-is worse than none. Lean on the `confidence` gate to reject those results rather
-than trusting them, and treat a rejected recording as "try again next play", which
-costs the user nothing since the feature is already best-effort.
-
-**Note:** this milestone's uncertainty is not technical. Local files are the honest
-path; treat streaming lock as a bonus. It is also the point at which the `Reactive`
-mode question (spec §17.2) must finally be answered — defer it until here, since
-real scores cover local files from M2 and users may rarely see it.
-
----
-
-### M7 — Tray, configuration, packaging
+### M5 — Tray, configuration, packaging
 
 **Crate:** `dancer-app`
 
 - `config.toml` per spec §13, hot-reloaded via `notify`.
 - Artwork hot reload.
-- `tray-icon`: source selection, click-through toggle, offset nudge, recording
-  opt-in with its disclosure.
+- `tray-icon`: source selection, click-through toggle, offset nudge (spec §9.2 —
+  this is now the only latency correction, so make it easy to reach).
+- Ship the `beat-this` ONNX weights: ~270 KB mel + ~10 MB small model. Not bundled
+  in the crate; pin a checksum.
 - Packaging and a neutral default sheet. **Do not ship FL-Chan** — Image-Line's
   artwork must not be redistributed (spec §1.3). Credit FAOSDance (MIT) for the
   sheet format.
@@ -368,11 +344,11 @@ real scores cover local files from M2 and users may rarely see it.
 
 ---
 
-### M8 — Optional extras
+### M6 — Optional extras
 
 Ordered by expected value, none on the critical path.
 
-1. **Segment labels.** Only if M7 shows unlabelled pools are the visible gap.
+1. **Segment labels.** Only if M5 shows unlabelled pools are the visible gap.
    Cheapest route is the Python `allin1` sidecar (spec §8.1) as pure enrichment:
    newline-delimited JSON over stdio, supplying `segments` and `cues` on top of a
    grid we already have. NATTEN remains a Windows barrier, but now for an optional
@@ -413,7 +389,7 @@ learn-on-second-listen work at all.
 Failure degrades gracefully: lose the resolver and you fall back to hashed strings,
 not to nothing.
 
-**The crate choice is contingent, and deferred to M8.** `yandex-music` is correct
+**The crate choice is contingent, and deferred to M6.** `yandex-music` is correct
 *for the resolver role*. It cannot serve the other role. If Yandex ever needs to be
 a real push `Source` — continuous position over ynison rather than SMTC's
 event-driven timeline — then `yamuse` is the crate, and it is a swap, not a flag:
@@ -429,20 +405,27 @@ against it, that is speculation. Two consequences for now:
   already takes `observed_at` per observation, which a push transport satisfies
   naturally — keep it that way.
 
-By M8, `yamuse` will have either matured past its current 75 downloads or gone
+By M6, `yamuse` will have either matured past its current 75 downloads or gone
 stale. Either outcome makes the decision easier than it is today.
 
 ### 5.9 A capability to fence off
 
 `yamuse` advertised lossless downloads, and other Yandex wrappers expose similar
-endpoints. This will look like an elegant fix for M6 — fetch the file, analyse it
-directly, no loopback recording, no seek-corruption problem, a perfect grid.
+endpoints. Fetch the file, analyse it directly, get a perfect grid.
 
-It is a considerably larger problem than the recording feature of spec §7.3 that
-already ships disabled. That is local capture of audio already playing; this is
-retrieving masters from a CDN. Whatever crate is used, keep `dancer-source` unable
-to reach download endpoints, so the analysis path cannot drift into them by
-convenience later.
+**Cutting audio capture made this more tempting, not less.** Recording was the
+legitimate — if awkward — route to a grid for a streamed track. With it gone
+(§4.1), streaming is idle-only, and a download endpoint sitting right there in a
+dependency we already ship is the obvious-looking way to close that gap.
+
+It should not be closed that way. Recording was local capture of audio already
+playing on the user's own machine, off by default and disclosed; this is retrieving
+masters from a CDN. Losing the weaker option does not upgrade the stronger one.
+
+So the guard matters more than before: keep `dancer-source` structurally unable to
+reach download endpoints, rather than relying on nobody reaching for them. The
+sanctioned answer to the same problem is the shared score cache (§6.4) — grids, not
+audio.
 
 ---
 
@@ -452,15 +435,19 @@ Carried forward, with the resolved ones struck.
 
 1. ~~Is Spotify's `audio-analysis` endpoint open to new apps?~~ **Moot.** We compute
    our own grids.
-2. Should `Reactive` mode exist in v1? **Defer to M6.** Real scores cover local
-   files from M2, so the mode may be rarely seen.
+2. ~~Should `Reactive` mode exist in v1?~~ **Resolved: no.** It needed live DSP,
+   which went with the audio subsystem (§4.1). Replaced by `Unscored`: default row,
+   fixed fps, honest about knowing nothing.
 3. Is 8 cells worth keeping as a hard constraint? **Keep it**, with the manifest
    free to override later. Costs nothing, buys the existing sheet library.
-4. Should scores be shareable — a small community repo of analysed track IDs? Worth
-   a closer look, but not before M7.
+4. **Promoted — now the only route to streaming support.** Should scores be
+   shareable: a fetchable cache of analysed track IDs, so a grid computed once
+   serves everyone? A score is timing metadata and contains no audio, which is what
+   makes this plausible where recording was not. Needs a licensing read and a
+   hosting answer. Spotify and Yandex are idle-only until it exists.
 5. **New:** Rust edition and MSRV. See §0.3.
 6. **New:** Does Yandex need ynison push-position, or does SMTC suffice? **Decide at
-   M8, not before.** The answer picks the crate — `yandex-music` for the resolver
+   M6, not before.** The answer picks the crate — `yandex-music` for the resolver
    role as planned, `yamuse` if a real push `Source` is required — and the two are
    a swap rather than a feature flag. Not answerable until M4 has run against
    Yandex Music desktop and shown whether SMTC's anchors hold up. See §5.8.

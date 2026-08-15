@@ -4,8 +4,8 @@
 **Target language:** Rust (2021 edition, MSRV 1.75+)
 **Primary platform:** Windows 10 2004+ (build 19041) and Windows 11, both
 first-class. Windows 10 is still a large share of the install base, so no feature
-may *require* a Windows 11-only API — see §7.1, where per-process audio capture is
-unavailable on every retail Windows 10 build and must degrade rather than gate.
+may *require* a Windows 11-only API. Applying that rule is what removed the audio
+subsystem — see §7.
 **Status:** Draft v2 — stack decided, design frozen enough to start Phase 0
 **Plan:** see [ROADMAP.md](ROADMAP.md)
 
@@ -35,8 +35,8 @@ possible if the timeline is known in advance.
 - Track identity, playback position and play/pause state from external players
   (Spotify, Yandex Music, browsers) without controlling playback.
 - Predictive scheduling: moves are queued ahead of time against a known beat grid.
-- Graceful degradation to reactive mode for unknown tracks, and automatic
-  improvement on subsequent plays of the same track.
+- Graceful degradation to a tempo-agnostic idle for tracks with no score, rather
+  than a wrong guess.
 
 ### 1.2 Non-goals (v1)
 
@@ -87,10 +87,9 @@ dancer-rs/
 │   ├── dancer-clock/       BeatClock, drift correction, phase estimation
 │   ├── dancer-choreo/      Move selection, anticipation scheduling
 │   ├── dancer-source/      `Source` trait + adapters (smtc, spotify, yandex, file)
-│   ├── dancer-audio/       WASAPI loopback capture, ring buffer, level metering
-│   ├── dancer-analyze/     beat-this grids, reactive DSP, optional sidecar client
+│   ├── dancer-analyze/     beat-this grids, optional sidecar client
 │   └── dancer-app/         Binary: wiring, tray icon, config, state machine
-└── sidecar/                Optional (M8). Python: allin1 wrapper for segment labels
+└── sidecar/                Optional (M6). Python: allin1 wrapper for segment labels
 ```
 
 ### 3.2 Threading model
@@ -103,8 +102,7 @@ No shared mutable state, no locks in the render path.
 | **Render** (main) | winit event loop, clock evaluation, blitting | 60 Hz, vsync-ish |
 | **Source poll** | tokio runtime; HTTP polls to Spotify/Yandex | 2–5 s |
 | **SMTC listener** | WinRT event subscriptions (session/media/timeline changed) | event-driven |
-| **Audio capture** | WASAPI loopback, fills ring buffer, computes RMS | ~10 ms buffers |
-| **Analysis** | Owns sidecar subprocess; long-running jobs | on demand |
+| **Analysis** | `beat-this` inference; optional sidecar subprocess | on demand |
 
 Communication: `crossbeam-channel` for thread→render messages. One `enum AppEvent`
 consumed by the render loop each frame. The render thread never blocks.
@@ -115,8 +113,6 @@ enum AppEvent {
     PositionReport { pos_ms: u64, playing: bool, at: Instant },
     PlaybackStopped,
     ScoreReady { id: TrackId, score: Arc<Score> },
-    AudioLevel { rms: f32, at: Instant },
-    AudioSilent,
     SheetReloaded(Arc<Sheet>),
     ConfigChanged(Config),
 }
@@ -249,7 +245,6 @@ Field notes:
 
 ```
 %LOCALAPPDATA%\dancer-rs\scores\{source}\{track_id}.json
-%LOCALAPPDATA%\dancer-rs\recordings\{source}\{track_id}.wav   (transient)
 ```
 
 Track IDs are namespaced per source. The same song from Spotify and from Yandex
@@ -369,11 +364,18 @@ not let REST polling assumptions leak into the `Source` trait. §6.1 already tak
 `observed_at` per observation, which a push transport satisfies naturally.
 
 **Do not reach the download endpoints.** Several Yandex wrappers expose lossless
-track downloads, which will look like an elegant fix for §8.3 — fetch the file,
-analyse it directly, skip loopback recording entirely. That is a considerably
-larger problem than the local capture §7.3 already ships disabled: retrieving
-masters from a CDN, not recording audio already playing. Keep `dancer-source`
-structurally unable to call them.
+track downloads — fetch the file, analyse it, get a perfect grid.
+
+Cutting audio capture (§7) made this *more* tempting, not less. Recording was the
+legitimate route to a grid for a streamed track; with it gone, streaming is
+idle-only (§8.3) and a download endpoint sitting inside a dependency we already
+ship looks like the obvious way to close the gap. Losing the weaker option does not
+upgrade the stronger one: recording was local capture of audio already playing on
+the user's machine, disabled by default; this is retrieving masters from a CDN.
+
+Keep `dancer-source` structurally unable to call them, rather than relying on
+nobody reaching. The sanctioned answer to the same problem is §17.4 — grids, not
+audio.
 
 ### 6.5 Local file adapter (development)
 
@@ -383,70 +385,40 @@ streaming service in the loop. **Build this first** — M0 through M3 depend on 
 
 ---
 
-## 7. Audio capture
+## 7. Audio capture — cut from v1
 
-Capture is **not** the primary sync mechanism. It serves four secondary purposes,
-all of which matter:
+**There is no audio subsystem.** No WASAPI, no loopback, no `dancer-audio` crate,
+no recording. This section records why, because the reasoning is easy to lose.
 
-1. **Silence watchdog.** Metadata lies. If RMS sits below the floor for >300 ms
-   while state claims Playing, freeze.
-2. **Offset calibration.** Cross-correlate live onsets against the score's beat
-   grid to measure end-to-end output latency, once per source app.
-3. **Recording for later analysis.** See §8.2.
-4. **Reactive fallback** for unknown tracks.
+Capture was never the sync mechanism — the original draft said so in its own first
+line. Beat grids come from offline analysis (§8.1) and position comes from the
+source adapters (§6). Capture existed only for four secondary purposes, and each
+one dissolved:
 
-### 7.1 WASAPI loopback
+| Purpose | Why it went |
+|---|---|
+| Silence watchdog | Guards a narrow failure class that SMTC's event subscriptions already report. On a full mix it fails toward false *non*-silence, so it is least reliable exactly where it would be needed |
+| Offset calibration | Real value, but a manual nudge gets there. Visual sync error is highly perceptible; users trim to within ~30 ms by eye, once per source app. See §9.2 |
+| Recording for analysis | Opt-in, disabled by default, prohibited by streaming ToS, and on a contaminated mix it yields corrupt grids — and a confidently wrong grid is worse than none |
+| Reactive fallback | §17.2 already questioned whether it belonged in v1 |
 
-Use the `wasapi` crate (explicit loopback support) rather than `cpal`, whose
-loopback story on Windows is less direct. Verify against the current version of
-both before committing.
+The decisive one was per-process capture. It was the mitigation for every
+contaminated-mix problem above, and it requires build 20348+ — Windows Server
+2022's build number. Retail Windows 10 ends at 19045, so **no consumer Windows 10
+build has the API at all**. With Windows 10 first-class (§1), the clean-capture
+path is unavailable to a large share of users, which left an entire subsystem whose
+best case was "sometimes less wrong".
 
-**Full-mix loopback is the primary path.** Default device loopback captures the
-whole system mix — including Discord, browser notifications and Windows sounds,
-all of which contaminate onset detection. That is a condition to design for, not
-an edge case, because the alternative is unavailable to most of the user base.
+**What this costs.** Without recording there is no learn-on-second-listen, so
+streamed unknown tracks get no grid — not degraded, absent. The app is excellent
+for local files; for Spotify and Yandex it knows identity and position but has
+nothing to dance to. See §17.4 for the intended answer.
 
-Per-process loopback — `ActivateAudioInterfaceAsync` with
-`AUDIOCLIENT_ACTIVATION_PARAMS` set to `PROCESS_LOOPBACK` and
-`PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE`, targeting the PID resolved
-from the SMTC session's `SourceAppUserModelId` — requires **build 20348+**. That is
-Windows Server 2022's build number. Retail Windows 10 ends at 19045 (22H2), so
-**no consumer Windows 10 build has this API**; it is effectively Windows 11 and up.
-Since Windows 10 is a first-class target (§1), treat per-process capture as an
-opportunistic enhancement: detect it, use it when present, and never require it.
+**What it buys.** One crate, two milestones, the `wasapi` dependency, the recording
+legal exposure, and the whole contaminated-mix design problem — all deleted.
 
-**Designing for a contaminated mix.** Capture is not the sync mechanism (see above),
-so contamination degrades secondary features rather than the core, and beat grids
-come from offline analysis regardless. Per purpose:
-
-- *Silence watchdog.* Contamination causes false **non**-silence — a notification
-  while the music is paused means the watchdog fails to fire, so the dancer keeps
-  moving to silence. Cross-check against SMTC playback state and treat the watchdog
-  as corroboration, never as the authority.
-- *Offset calibration.* Cross-correlation over a 4 s window is dominated by the
-  music. Advise a quiet system during calibration and discard runs with a weak
-  correlation peak rather than storing a bad offset.
-- *Recording for analysis (§8.3).* The real casualty. A notification mid-track can
-  corrupt the derived grid, and a confidently wrong grid is worse than none — so
-  lean on the `confidence` gate to reject the result rather than trusting it.
-- *Reactive fallback.* Bandpass to the low band before onset detection. Kick drums
-  live there; notification chimes and Discord alerts mostly do not.
-
-### 7.2 Buffer and DSP
-
-- 44.1 kHz, mono downmix, f32.
-- 1024-sample analysis window, 512 hop (≈11.6 ms) — fine enough for onsets.
-- `realfft` for the FFT. Spectral flux = sum of positive magnitude deltas.
-- Ring buffer of 30 s for calibration correlation; separate streaming WAV writer
-  for recording mode.
-
-### 7.3 A note on recording
-
-Recordings are local, transient, and used only to derive a beat grid — the WAV is
-deleted once the score is written. Streaming services' terms generally prohibit
-capturing their output, so this must be off by default, disclosed clearly in the
-UI, and user-enabled. If it stays off, the app simply never leaves reactive mode
-for streamed tracks.
+Revisit post-v1 if the shared-score path (§17.4) fails to materialise and streaming
+support turns out to matter more than the cost.
 
 ---
 
@@ -505,19 +477,23 @@ a per-track stem separation pass is a steep price for section *names*.
 (tempo, key, chord, melody, structure, genre, mood) against its version and
 adoption does not survive scrutiny; benchmark before trusting it.
 
-### 8.3 Learn-on-second-listen
+### 8.3 Where scores come from
 
-The behaviour that makes streaming sources work at all:
+Analysis needs a file it can read. That gives two paths, and deliberately not a
+third:
 
-1. Unknown track starts. No score → `Reactive`.
-2. If recording is enabled, capture loopback to a temp WAV.
-3. Track plays to completion without seeking → hand the WAV to the analyzer.
-4. Score is cached under the track ID; WAV deleted.
-5. Next time that track plays → `Locked`, predictive, from the first beat.
+1. **Local files.** The file adapter (§6.5) hands `dancer-analyze` a real path.
+   Analyse once, cache under the track ID (§5.1), locked from the first beat on
+   every later play. This is the primary path and it works offline.
+2. **Streamed tracks.** No readable file, and with the audio subsystem cut (§7) no
+   recording either — so no local route to a grid. The intended answer is a shared
+   score cache: fetch a grid by track ID that someone else has already computed.
+   See §17.4; unresolved, and streaming is idle-only until it is.
 
-Discard the recording if the user seeks, skips, or pauses for more than a few
-seconds — a discontinuous capture produces a corrupt beat grid, and a confidently
-wrong grid is worse than no grid.
+Learn-on-second-listen — capture the loopback, analyse the WAV, cache the result —
+was the previous answer to (2). It is cut with the rest of §7. It was opt-in,
+disabled by default, prohibited by streaming ToS, and on a full mix it produced
+corrupt grids, which the `confidence` gate would mostly have rejected anyway.
 
 ---
 
@@ -571,13 +547,25 @@ Correct by bending the rate.
 ### 9.2 Offset calibration
 
 `offset` absorbs everything between "the player says it is at 42.0 s" and "the
-sound reaches the speakers": decoder buffering, WASAPI buffer, and for HTTP
-sources the request round-trip.
+sound reaches the speakers": decoder buffering, the output buffer, and for HTTP
+sources the request round-trip. Typical range 100–300 ms.
 
-Measure it once per source app: with a score loaded, collect 4 s of loopback
-onsets, cross-correlate against the score's beat times, take the lag at peak
-correlation. Store per `SourceAppUserModelId` in config. Typical range 100–300 ms.
-Expose a manual nudge slider — users will want to trim it by eye.
+This is not a rounding error. At 128 BPM a beat is 469 ms, so an uncalibrated
+offset can exceed half a beat — enough to make "the impact frame lands on the beat"
+simply false. It has to be corrected.
+
+**Calibration is manual.** A nudge slider per source app, stored in config,
+persisted across restarts. Automatic measurement — cross-correlating loopback
+onsets against the beat grid — was the last surviving justification for the audio
+subsystem and did not survive the cost (§7).
+
+Manual is a smaller loss than it looks. Sync error is highly perceptible visually,
+which is the same faculty that would judge whether auto-calibration had worked, so
+a user trims to within a few tens of milliseconds by eye in seconds. It is a
+one-time action per source app, not a per-track one.
+
+Ship sensible defaults so the first run is close: roughly 180 ms for local
+playback, 250 ms for browsers.
 
 ---
 
@@ -587,21 +575,19 @@ Expose a manual nudge slider — users will want to trim it by eye.
 |---|---|---|
 | `Idle` | Nothing playing | Default row, slow fixed fps, or hidden |
 | `Identifying` | Track known, score lookup in flight | Idle row, tempo-agnostic |
-| `Reactive` | Playing, no usable score | Online tempo estimate from loopback; no anticipation |
-| `Recording` | Overlaps `Reactive`; capturing for analysis | No visual difference |
+| `Unscored` | Playing, no usable score | Default row at a fixed fps. No tempo guess — FAOSDance behaviour, honestly labelled |
 | `Locked` | Score loaded, clock confident | Full predictive scheduling |
 | `Resync` | Seek/skip/drift detected | Continue current row to its loop point, re-anchor |
 
 Transitions:
 
 - `TrackChanged` → `Identifying` from any state. Cancel queued moves.
-- Score found and `confidence >= 0.6` → `Locked`. Else → `Reactive`.
+- Score found and `confidence >= 0.6` → `Locked`. Else → `Unscored`.
 - `playing == false` → freeze the clock (do not advance `anchor_local`), finish the
   current row to its loop boundary, settle into the default row. Do **not** cut
   mid-move; a hard stop reads as a crash.
 - Resume → re-anchor, then wait for the next downbeat before resuming full moves.
   Starting mid-bar looks worse than a half-second of idle.
-- `AudioSilent` for >300 ms while nominally playing → treat as paused.
 - `ScoreReady` → `Locked` if the ID still matches what's playing.
 - Drift beyond `SEEK_THRESHOLD` → `Resync` → `Locked` once two consecutive polls agree.
 
@@ -741,16 +727,14 @@ order = ["spotify", "smtc"]
 allowlist = ["Spotify.exe", "YandexMusic.exe", "chrome.exe"]
 poll_interval_ms = 3000
 
-[audio]
-enabled = true
-per_process_loopback = true
-recording_enabled = false          # off by default; see §7.3
-[audio.offset_ms]
+# Manual output-latency trim per source app, milliseconds. See §9.2.
+[offset_ms]
 "Spotify.exe" = 180
 "chrome.exe"  = 250
 
 [analysis]
-sidecar_path = "sidecar/dancer-analyze.exe"
+model_dir = "models"               # beat-this ONNX weights; see §8.1
+sidecar_path = "sidecar/dancer-analyze.exe"    # optional, M6
 min_confidence = 0.6
 
 [choreo]
@@ -775,10 +759,11 @@ table below.
 | **M2** | Real analyzer + score cache | `beat-this` produces a score from a local file, cached to disk, indistinguishable in use from the hand-written one |
 | **M3** | Anticipation scheduler | `impact_cell` respected; A/B against M1 shows the difference is visible |
 | **M4** | SMTC source | Identity, position and pause/resume from Spotify desktop; correct freeze and resume-on-downbeat behaviour |
-| **M5** | WASAPI loopback | Per-process capture, silence watchdog, offset calibration producing a stable measured value |
-| **M6** | Learn-on-second-listen | An unknown streamed track is reactive on play 1 and locked on play 2 |
-| **M7** | Tray UI, config, packaging | Installable by a stranger |
-| **M8** | *Optional:* segment labels, Yandex resolver, Spotify | Only if M7 shows unlabelled pools are the visible gap |
+| **M5** | Tray UI, config, packaging | Installable by a stranger |
+| **M6** | *Optional:* segment labels, Yandex resolver, Spotify | Only if M5 shows unlabelled pools are the visible gap |
+
+The old M5 (WASAPI loopback) and M6 (learn-on-second-listen) were cut with the
+audio subsystem — see §7.
 
 Analysis moved ahead of the scheduler: it stopped being a Python deployment problem
 (§8.1) and became a crate call, and testing anticipation against *real* grids —
@@ -798,15 +783,13 @@ plumbing to feed it.
 |---|---|
 | `winit` | Windowing, event loop, cursor hit-test |
 | `image` | PNG decode |
-| `windows` | SMTC, WASAPI, `UpdateLayeredWindow` presentation and window styles |
-| `wasapi` | Loopback capture (verify per-process support) |
+| `windows` | SMTC, `UpdateLayeredWindow` presentation and window styles |
 | `beat-this` | Beat + downbeat tracking (§8.1) |
 | `rten` | ML runtime backing `beat-this`; `ort` behind a feature flag for cross-check |
 | `symphonia` / `rubato` | Audio decode and resampling (arrive via `beat-this`) |
-| `realfft` / `rustfft` | Spectral analysis |
 | `tokio` + `reqwest` | Async source polling |
-| `rspotify` | Spotify Web API + OAuth PKCE (M8) |
-| `yandex-music` | Yandex track ID resolution (M8, §6.4) |
+| `rspotify` | Spotify Web API + OAuth PKCE (M6) |
+| `yandex-music` | Yandex track ID resolution (M6, §6.4) |
 | `serde` / `serde_json` / `toml` | Score, manifest, config |
 | `crossbeam-channel` | Thread messaging |
 | `notify` | Config and artwork hot reload |
@@ -825,16 +808,17 @@ plumbing to feed it.
 | Downbeat detection unreliable | Moves change half a bar early; reads as stumbling | Fit bar phase to candidates and reject outliers (§11.3). Confirmed real in Phase 0.1 |
 | Meter assumed 4/4 | Waltzes and odd meters schedule wrong | `meter` field in the score (§5); `beats_per_loop` relative to it |
 | Model weights not bundled in the crate | ~10–83 MB to ship and version | Vendor with the installer; pin a checksum |
-| GNU toolchain vs MSVC | WinRT/WASAPI less travelled on GNU; `ort` fallback awkward | Unaffected through M3. Switch to `stable-msvc` before M4 |
-| No functional segmentation available | Pools can't key on section labels | Energy-tier selection (§11.3); labels are enrichment, not timing. Optional sidecar in M8 |
+| GNU toolchain vs MSVC | WinRT (SMTC) less travelled on GNU; `ort` fallback awkward | Unaffected through M3. Switch to `stable-msvc` before M4 |
+| No functional segmentation available | Pools can't key on section labels | Energy-tier selection (§11.3); labels are enrichment, not timing. Optional sidecar in M6 |
 | NATTEN build on Windows | Optional segment labels unavailable | No longer blocks the product (§8.2). Ship without labels |
 | ~~winit gives colour-keying, not per-pixel alpha~~ | — | **Retired.** Phase 0.2 measured the `UpdateLayeredWindow` path exact to ±1 across an alpha ramp. `softbuffer` dropped: it has no alpha channel |
 | Yandex internal API changes | ID resolution breaks | Feature flag; SMTC still supplies position and identity, degraded to hashed strings |
-| Recording legality / ToS | Feature must ship disabled | Off by default, explicit opt-in, local-only, WAV deleted after analysis |
-| Track download endpoints used for analysis | Substantially worse ToS exposure than §7.3 | Keep `dancer-source` structurally unable to reach them (§6.4) |
+| ~~Recording legality / ToS~~ | — | **Retired.** Audio capture cut from v1 (§7); nothing records anything |
+| Streamed tracks have no grid path | Spotify/Yandex are idle-only in v1 | Accepted cost of cutting §7. The shared score cache (§17.4) is the intended answer and is unresolved |
+| Track download endpoints used for analysis | Retrieving masters from a CDN. **More tempting since §7 was cut** — it is now the obvious-looking way to give streaming a grid | Keep `dancer-source` structurally unable to reach them (§6.4). The sanctioned answer is §17.4 |
 | SMTC session ambiguity | Wrong app drives the dancer | Allowlist + explicit source selection in tray |
-| Per-process loopback needs build 20348+ | Unavailable on **every** retail Windows 10 build (19045 is the last), so a large share of users get a contaminated mix | Full-mix is the primary path, not the fallback (§7.1). Bandpass the low band for onsets; corroborate the watchdog with SMTC state; let `confidence` reject corrupted recordings. Dev machine is 19044, so the Win10 path is what gets tested by default — validate per-process on a Win11 box before M5 exits |
-| Sheets lack `impact_cell` | No anticipation, back to FAOSDance behaviour | Ship an annotated default sheet; add a small cell-picker tool in M7 |
+| ~~Per-process loopback needs build 20348+~~ | — | **Retired.** This constraint is what removed the audio subsystem rather than something to mitigate (§7) |
+| Sheets lack `impact_cell` | No anticipation, back to FAOSDance behaviour | Ship an annotated default sheet; add a small cell-picker tool in M5 |
 
 ---
 
@@ -842,20 +826,23 @@ plumbing to feed it.
 
 1. ~~Is Spotify's `audio-analysis` endpoint available to new apps?~~ **Resolved:
    moot.** §8.1 computes our own grids, so the answer no longer changes anything.
-2. Should `Reactive` mode exist at all in v1, or is idle-until-known acceptable?
-   It's a meaningful chunk of DSP work for a mode users may rarely see. **Defer to
-   M6** — real scores cover local files from M2, so the mode's actual exposure
-   isn't knowable until streamed tracks are in play.
+2. ~~Should `Reactive` mode exist in v1?~~ **Resolved: no.** It needed live DSP,
+   which went with the audio subsystem (§7). Replaced by `Unscored` — the default
+   row at a fixed fps, which is honest about knowing nothing rather than guessing.
 3. Sheet compatibility: is 8 cells worth keeping as a hard constraint, or should
    the manifest allow arbitrary widths with 8 as the default? **Keep it**, with the
    manifest free to override later. Costs nothing and buys the whole existing
    sheet library.
-4. Should scores be shareable — a small community repo of analysed track IDs — so
-   users skip the learn-on-second-listen step? Distributing derived beat grids is
-   likely fine; worth a closer look before designing for it. Not before M7.
+4. **Promoted — this is now the only path to streaming support.** Should scores be
+   shareable: a fetchable cache of analysed track IDs, so a grid computed once by
+   anyone serves everyone? A score is timing metadata — beat times, downbeats, bpm
+   — and contains no audio, which is what makes this plausible where recording was
+   not. With learn-on-second-listen cut (§8.3), Spotify and Yandex are idle-only
+   until this exists. Needs a licensing read and a hosting/curation answer before
+   it can be designed. See §7 for what it replaces.
 5. Rust edition and MSRV. §1 says 2021 / 1.75+, written before this dependency set;
    edition 2024 (Rust 1.85+) is likely the better default. Settle before `cargo new`.
 6. Does Yandex need ynison push-position, or does SMTC suffice? The answer picks
    the crate — `yandex-music` for the resolver role, `yamuse` for a real push
-   `Source` — and it is a swap, not a flag. **Decide at M8**, once M4 has shown
+   `Source` — and it is a swap, not a flag. **Decide at M6**, once M4 has shown
    whether SMTC's anchors hold up against Yandex Music desktop. See §6.4.
