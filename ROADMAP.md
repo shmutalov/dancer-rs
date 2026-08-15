@@ -28,7 +28,7 @@ removes something the original spec assumed was necessary.
 | Functional segmentation | **Deferred to M6** | No trustworthy Rust option. `oximedia-mir` advertises it but its breadth-to-adoption ratio does not survive scrutiny. Derive boundaries from novelty + RMS instead |
 | Python `allin1` sidecar | **Optional, off the critical path** | Was the primary analysis path in spec §8.1. Now an M6 enrichment supplying segment labels only |
 | Yandex integration | **`yandex-music`** (vyfor) as an ID resolver | Mature: 0.7.0, ~15K downloads, maintained since June 2024. REST-only, so it cannot serve as a `Source` — see §5.8 |
-| Yandex realtime (`yamuse`) | **Open — decide at M6** | Has the ynison WebSocket that vyfor's lacks. If ynison is needed, the crate changes; the two are not interchangeable behind a flag. See §5.8 and §6.6 |
+| Yandex realtime (`yamuse`) | **Chosen 2026-08-15** | Replaces `yandex-music`: it has the ynison WebSocket, so Yandex becomes a push `Source` rather than an ID resolver. Two caveats — it is very young, and its value is now questionable given streaming is permanently `Unscored`. See §5.8 |
 
 ### 1.1 What these decisions delete
 
@@ -134,27 +134,52 @@ Rust edition: **2024**. Local toolchain is 1.95.0, well past the 1.85 floor, and
 0.1 built and ran the full dependency tree on it. Spec §1's 2021 / 1.75+ predates
 this dependency set.
 
-### 0.4 Toolchain ABI — **OPEN, decide before M4**
+### 0.4 Toolchain ABI — **GNU proven; MSVC install in flight 2026-08-15**
 
-Surfaced by 0.1: the local toolchain is `stable-x86_64-pc-windows-gnu`, and no
-Visual Studio C++ toolset is installed (`vswhere` finds no product with
-`VC.Tools.x86.x64`).
+The original question was whether to install MSVC before M4. It has been overtaken:
+GNU was chosen, everything was verified on it, and MS Build Tools are now being
+installed anyway. So the outcome is better than either branch alone.
 
-This did not matter for 0.1 — the analyzer path is pure Rust and built clean. It
-may matter later, because MSVC is the primary target for Windows-native work:
+**Everything measured works on GNU:**
 
-- **M0–M3** are unaffected. `winit`, `image`, `beat-this` all build and run on GNU,
-  and Phase 0.2 exercised `UpdateLayeredWindow` through the `windows` crate on it
-  successfully — so even the Win32 presentation path is proven on this ABI.
-- **M4+** is the risk. The `windows` crate supports both ABIs, but WinRT (SMTC) is
-  better travelled on MSVC. Smaller now that WASAPI is gone (§4.1), but SMTC is the
-  one remaining WinRT surface and it is M4's whole content.
-- **The `ort` fallback** from 0.1 would be awkward on GNU: prebuilt
-  `libonnxruntime` binaries are MSVC-built. Only relevant if we ever leave `rten`.
+| Surface | Status |
+|---|---|
+| `beat-this` + `rten` | Builds and runs (0.1) |
+| `UpdateLayeredWindow` via `windows` | Builds and runs (0.2) |
+| `rusqlite` (`bundled`, C compile) | Builds and runs, 53 s, via mingw gcc |
+| WinRT / SMTC | Activates and enumerates (0.5) |
 
-Switching is `rustup toolchain install stable-msvc` plus a VS Build Tools install
-(several GB). Cheap to do now, annoying to discover at M4 after building on the
-wrong ABI. Recommend switching before M4 rather than at it.
+That result keeps its value whichever toolchain ships. It means the project is not
+*locked* to MSVC: contributors without Visual Studio can build it, and CI has a
+cheap option. Worth keeping true — check GNU still builds before each release
+rather than letting it rot.
+
+**Once MSVC lands, prefer it** as the primary target: it is the better-travelled
+ABI for WinRT, and it restores the `ort` fallback from 0.1 at full strength.
+Prebuilt `libonnxruntime` binaries are MSVC-built, so under GNU that contingency
+would have meant building onnxruntime for mingw or switching toolchain under
+pressure. With both available, the fallback is cheap again.
+
+No code decision hangs on this — nothing in the design differs between the two.
+Build under both, ship whichever is preferred.
+
+### 0.5 WinRT on GNU — **PARTIAL PASS 2026-08-15**
+
+Harness: [spikes/smtc-probe](spikes/smtc-probe/). Written because §0.4 rules out
+MSVC and SMTC is the last unproven ABI surface — and it is the entire content of M4.
+
+`GlobalSystemMediaTransportControlsSessionManager::RequestAsync()` activates,
+`.join()` resolves the async operation, and `GetSessions()` enumerates. That is the
+COM/WinRT ABI working end to end on the GNU toolchain, which was the actual risk.
+
+API note for M4: the blocking accessor on `IAsyncOperation` is `join()`, not
+`get()`.
+
+**Still untested:** reading properties off a *live* session — `TryGetMediaProperties`,
+`GetPlaybackInfo`, and above all `GetTimelineProperties().LastUpdatedTime`, which
+spec §6.2 requires as the clock anchor. Nothing was playing when the probe ran. The
+same ABI is already proven, so failure is unlikely, but "unlikely" is not "checked".
+Re-run with music playing to close it.
 
 ---
 
@@ -432,24 +457,29 @@ learn-on-second-listen work at all.
 Failure degrades gracefully: lose the resolver and you fall back to hashed strings,
 not to nothing.
 
-**The crate choice is contingent, and deferred to M6.** `yandex-music` is correct
-*for the resolver role*. It cannot serve the other role. If Yandex ever needs to be
-a real push `Source` — continuous position over ynison rather than SMTC's
-event-driven timeline — then `yamuse` is the crate, and it is a swap, not a flag:
-different author, different API shape, different transport.
+**Decided 2026-08-15: `yamuse`.** It carries ynison, so Yandex can be a real push
+`Source` — continuous position over a WebSocket rather than SMTC's event-driven
+timeline — and it also exposes catalogue, so it covers identity too. That makes it
+a replacement for `yandex-music` rather than a companion to it.
 
-Which means the decision belongs at implementation time, when we know whether
-SMTC's anchors are actually good enough for Yandex Music desktop. Until M4 has run
-against it, that is speculation. Two consequences for now:
+Two things to carry into M6 with it.
 
-- Keep the resolver behind a narrow internal interface, so replacing or
-  supplementing it doesn't reach into `dancer-clock` or `dancer-choreo`.
-- Do not design the `Source` trait around REST polling assumptions. Spec §6.1
-  already takes `observed_at` per observation, which a push transport satisfies
-  naturally — keep it that way.
+**It is young.** 0.3.2, first published 2026-07-29, five releases in six days, 75
+downloads at the time of choosing. Keep it feature-flagged, keep SMTC covering the
+same player, and do not let a break take down the binary. `yandex-music` (vyfor,
+~15K downloads, maintained since June 2024) remains the fallback for the resolver
+role if yamuse stalls.
 
-By M6, `yamuse` will have either matured past its current 75 downloads or gone
-stale. Either outcome makes the decision easier than it is today.
+**Its main advantage may no longer buy anything.** ynison's value is *precise
+position*, and position precision only matters in `Locked`. Streamed tracks are
+permanently `Unscored` (§4.2): no recording, no hosted grids, no downloads. An
+`Unscored` dancer runs a fixed-fps loop, where a tighter anchor changes nothing
+visible.
+
+So on the current design this is close to a no-op, bought at the cost of a young
+dependency that also ships the download endpoints §5.9 fences off. It is worth
+revisiting at M6 — either because something has changed, or to decide that Yandex
+integration beyond SMTC is not worth doing at all.
 
 ### 5.9 A capability to fence off
 
@@ -488,8 +518,7 @@ Carried forward, with the resolved ones struck.
    cache is one file, so copying it to a friend happens to work — a consequence of
    the storage choice, not a feature. Streamed tracks stay `Unscored` (§4.2).
 5. **New:** Rust edition and MSRV. See §0.3.
-6. **New:** Does Yandex need ynison push-position, or does SMTC suffice? **Decide at
-   M6, not before.** The answer picks the crate — `yandex-music` for the resolver
-   role as planned, `yamuse` if a real push `Source` is required — and the two are
-   a swap rather than a feature flag. Not answerable until M4 has run against
-   Yandex Music desktop and shown whether SMTC's anchors hold up. See §5.8.
+6. ~~Does Yandex need ynison push-position?~~ **Resolved: `yamuse` chosen.** But
+   see §5.8 — with streaming permanently `Unscored`, precise position buys nothing
+   visible, so the open question became whether Yandex integration beyond SMTC is
+   worth building at all. Revisit at M6.

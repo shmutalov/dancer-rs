@@ -409,16 +409,23 @@ Still feature-flagged, still must not take down the binary. It wraps an
 undocumented internal API and needs an OAuth token extracted from the desktop
 client or web session — Rust removes the Python runtime, not the moving target.
 
-**If ynison is ever needed, the crate changes.** The `yamuse` crate has the ynison
-realtime WebSocket that this one lacks, which would make Yandex a push source with
-tighter anchors than SMTC's event-driven timeline. The two are not interchangeable
-behind a feature flag — different author, API shape and transport — so this is a
-swap, and it belongs at implementation time rather than now. Whether SMTC's anchors
-suffice for Yandex Music desktop is not knowable until M4 has run against it.
+**Decided 2026-08-15: `yamuse`.** It carries the ynison realtime WebSocket, so
+Yandex can be a push `Source` — continuous position rather than SMTC's event-driven
+timeline — and it exposes catalogue too, so it covers identity. It replaces
+`yandex-music` rather than sitting beside it.
 
-Design accordingly: keep the resolver behind a narrow internal interface, and do
-not let REST polling assumptions leak into the `Source` trait. §6.1 already takes
-`observed_at` per observation, which a push transport satisfies naturally.
+`yamuse` is young: 0.3.2, first published 2026-07-29, 75 downloads at the time of
+choosing. Keep it feature-flagged, keep SMTC covering the same player, and do not
+let a break take the binary down. `yandex-music` (vyfor, ~15K downloads, maintained
+since June 2024) stays the fallback for the resolver role.
+
+**Note the tension.** ynison's advantage is *precise position*, which only matters
+in `Locked`. Streamed tracks are permanently `Unscored` (§8.3) — no recording, no
+hosted grids, no downloads — and an `Unscored` dancer runs a fixed-fps loop where a
+tighter anchor changes nothing visible. On the current design this buys little,
+while adding a young dependency that ships the very download endpoints fenced off
+below. Revisit at M6, including the option of not building Yandex support beyond
+SMTC at all.
 
 **Do not reach the download endpoints.** Several Yandex wrappers expose lossless
 track downloads — fetch the file, analyse it, get a perfect grid.
@@ -885,7 +892,7 @@ plumbing to feed it.
 | `symphonia` / `rubato` | Audio decode and resampling (arrive via `beat-this`) |
 | `tokio` + `reqwest` | Async source polling |
 | `rspotify` | Spotify Web API + OAuth PKCE (M6) |
-| `yandex-music` | Yandex track ID resolution (M6, §6.4) |
+| `yamuse` | Yandex ynison push source (M6, §6.4); `yandex-music` is the fallback |
 | `serde` / `serde_json` / `toml` | Score, manifest, config |
 | `rusqlite` (`bundled`) | Single-file score cache and library index (§5.1) |
 | `crossbeam-channel` | Thread messaging |
@@ -943,7 +950,7 @@ plumbing to feed it.
    product; streaming is `Unscored`.
 5. Rust edition and MSRV. §1 says 2021 / 1.75+, written before this dependency set;
    edition 2024 (Rust 1.85+) is likely the better default. Settle before `cargo new`.
-6. Does Yandex need ynison push-position, or does SMTC suffice? The answer picks
-   the crate — `yandex-music` for the resolver role, `yamuse` for a real push
-   `Source` — and it is a swap, not a flag. **Decide at M6**, once M4 has shown
-   whether SMTC's anchors hold up against Yandex Music desktop. See §6.4.
+6. ~~Does Yandex need ynison push-position?~~ **Resolved: `yamuse` chosen.** The
+   live question is now whether Yandex support beyond SMTC is worth building at
+   all, since streaming is permanently `Unscored` and precise position buys nothing
+   visible. Revisit at M6. See §6.4.
