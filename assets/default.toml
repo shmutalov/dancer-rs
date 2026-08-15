@@ -1,0 +1,38 @@
+# Neutral default sheet. See spec §4.2.
+[sheet]
+cell_width = 110
+cell_height = 128
+default_row = "idle"
+
+[[row]]
+name = "idle"
+index = 0
+impact_cell = 0
+beats_per_loop = 2
+pools = ["idle", "intro", "outro"]
+energy = 0.15
+loopable = true
+
+[[row]]
+name = "bounce"
+index = 1
+impact_cell = 3        # knees deepest here — schedule the START before the beat
+beats_per_loop = 1
+pools = ["verse", "chorus"]
+energy = 0.55
+loopable = true
+
+[[row]]
+name = "spin"
+index = 2
+impact_cell = 4
+beats_per_loop = 2
+pools = ["chorus"]
+energy = 0.9
+loopable = true
+
+[[row]]
+name = "Held"
+index = 3
+impact_cell = 0
+pools = []
