@@ -17,6 +17,7 @@ removes something the original spec assumed was necessary.
 | Concern | Decision | Rationale |
 |---|---|---|
 | Primary language | **Rust, end to end** | Every layer has a first-class crate; Python survives only as an optional extra |
+| Toolchain | **GNU**, pinned in `rust-toolchain.toml` | MSVC needs a ~2 GB Windows SDK for import libraries. Every surface verified on GNU instead — see §0.4 |
 | Windows 10 | **First-class, not degraded** | Large share of the install base. No feature may require a Win11-only API. Applying that rule is what removed the audio subsystem — see §4.1 |
 | Audio capture | **Cut from v1** | No WASAPI, no loopback, no recording, no `dancer-audio`. Every purpose it served either dissolved or has a cheaper answer. Costs streaming support; see §4.1 |
 | Hosted score sharing | **Rejected** | No server, no hosting. Analyse and cache locally. Streaming is permanently `Unscored`; owned music via a library index is the product — see §4.2 |
@@ -134,34 +135,51 @@ Rust edition: **2024**. Local toolchain is 1.95.0, well past the 1.85 floor, and
 0.1 built and ran the full dependency tree on it. Spec §1's 2021 / 1.75+ predates
 this dependency set.
 
-### 0.4 Toolchain ABI — **GNU proven; MSVC install in flight 2026-08-15**
+### 0.4 Toolchain ABI — **DECIDED 2026-08-15: GNU**
 
-The original question was whether to install MSVC before M4. It has been overtaken:
-GNU was chosen, everything was verified on it, and MS Build Tools are now being
-installed anyway. So the outcome is better than either branch alone.
+`stable-x86_64-pc-windows-gnu`, pinned in [rust-toolchain.toml](rust-toolchain.toml).
 
-**Everything measured works on GNU:**
+MSVC was investigated and dropped on cost. Visual Studio Build Tools 2026 installs
+`cl.exe` and `link.exe`, but Rust's MSVC target also links every binary against
+system import libraries — `kernel32.lib`, `ntdll.lib`, `ws2_32.lib`, `dbghelp.lib`
+— which ship in the **Windows SDK**, not with the VC tools. That is a ~2 GB
+component with no smaller option exposed in the installer, bought for benefits we
+may never collect.
+
+**Everything this project needs is verified on GNU:**
 
 | Surface | Status |
 |---|---|
 | `beat-this` + `rten` | Builds and runs (0.1) |
-| `UpdateLayeredWindow` via `windows` | Builds and runs (0.2) |
-| `rusqlite` (`bundled`, C compile) | Builds and runs, 53 s, via mingw gcc |
+| `UpdateLayeredWindow` via `windows` | Builds and runs, alpha exact to ±1 (0.2) |
+| `rusqlite` (`bundled`, C compile via mingw gcc) | Builds and runs, 53 s |
 | WinRT / SMTC | Activates and enumerates (0.5) |
 
-That result keeps its value whichever toolchain ships. It means the project is not
-*locked* to MSVC: contributors without Visual Studio can build it, and CI has a
-cheap option. Worth keeping true — check GNU still builds before each release
-rather than letting it rot.
+**Accepted risk.** The `ort` cross-check from 0.1 is materially weaker here:
+prebuilt `libonnxruntime` binaries are MSVC-built, so if `beat-this` ever degrades
+we would have to build onnxruntime for mingw or install the SDK at that point.
+Phase 0.1 passed, so this is a contingency, not a plan — but it is no longer cheap.
 
-**Once MSVC lands, prefer it** as the primary target: it is the better-travelled
-ABI for WinRT, and it restores the `ort` fallback from 0.1 at full strength.
-Prebuilt `libonnxruntime` binaries are MSVC-built, so under GNU that contingency
-would have meant building onnxruntime for mingw or switching toolchain under
-pressure. With both available, the fallback is cheap again.
+#### Two environment traps, if MSVC is ever revisited
 
-No code decision hangs on this — nothing in the design differs between the two.
-Build under both, ship whichever is preferred.
+Both cost time to diagnose and neither error message points at the cause.
+
+1. **`link.exe` is shadowed by busybox.** On this machine PATH resolves `link.exe`
+   to `scoop\shims\link.exe`, which is busybox's hardlink utility:
+   `path = "...usybox\currentusybox.exe"`, `args = link`. Handed MSVC linker
+   arguments it fails with `link: extra operand ... Try 'link --help'` — which
+   looks nothing like a toolchain problem. It shadows in PowerShell as well as Git
+   Bash.
+2. **rustc falls through to PATH when MSVC detection fails.** Normally rustc
+   locates the MSVC toolchain and prepends its paths, which would beat the shim.
+   With the SDK missing, detection fails and it invokes a bare `link.exe` — so
+   trap 1 only becomes visible because of trap 2. Fixing the SDK may resolve both.
+
+**SDK version note, if it is ever installed:** the SDK version does not set the
+minimum supported Windows version. Building against the 24H2 SDK (10.0.26100.x)
+still produces binaries that run on our Windows 10 build 19041 floor — what matters
+is which APIs are called, not which SDK is linked. The `windows` crate also carries
+its own WinRT metadata, so SMTC needs no SDK headers, only the import libraries.
 
 ### 0.5 WinRT on GNU — **PARTIAL PASS 2026-08-15**
 

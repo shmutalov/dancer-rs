@@ -1,0 +1,10 @@
+# Pinned to GNU deliberately — see ROADMAP.md §0.4.
+#
+# The MSVC target needs the Windows SDK (~2 GB) for kernel32.lib and friends,
+# which is not installed. Every surface this project uses is verified working on
+# GNU: beat-this/rten, UpdateLayeredWindow, rusqlite's C build, and WinRT/SMTC.
+#
+# This pin also protects against rustup's default toolchain drifting to MSVC,
+# which would otherwise fail at link time with a confusing error.
+[toolchain]
+channel = "stable-x86_64-pc-windows-gnu"
