@@ -63,15 +63,34 @@ Not tested: Chrome, Firefox, Opera, AIMP, foobar2000, VLC, Spotify desktop. Wort
 compatibility sweep before M4 exits, since "which players publish" determines how
 much of M4's value is real.
 
-### 3. Titles need real normalisation
+### 3. Titles vary by source — which argues *against* normalising
 
 Edge reported title `"Blur - Song 2 (Official Music Video)"` with artist `"Blur"`.
 
-To match that against a library file (spec §8.3) the normaliser has to strip the
-`(Official Music Video)` suffix *and* cope with the artist being duplicated into
-the title. This is the first real specimen for the awkward-title fixture set M4
-calls for — and it arrived from the very first track tested, which suggests the
-problem is the common case rather than an edge case.
+The first reading was that this demands aggressive normalisation: strip the
+parenthetical, de-duplicate the artist out of the title. That is the wrong
+conclusion. The same song appears as:
+
+```
+Blur - Song 2
+Blur Song 2
+Blur - Song 2 (Official Music Video)
+Blur - Song 2 (Radio Edit)
+```
+
+A radio edit is a *different recording* — different length, different grid.
+Canonicalising the content merges it with the album version and applies the wrong
+timeline, which is a false positive. Hashing the raw string at worst produces a
+miss. Spec §8.3 already holds that a confidently wrong grid is worse than none, so
+the miss is the correct failure.
+
+The common case never needed normalisation anyway: playing a local file through an
+ordinary player makes SMTC report *that file's own tags*, so the strings match
+exactly because they came from the same place.
+
+Resolution (spec §5.1): hash the raw strings, with encoding-level normalisation
+only — trim, NFC, casefold — and verify duration on match, ±2 s. The probe gets
+duration free from `EndTime`, which read 122.541 s here.
 
 ## Caveat
 

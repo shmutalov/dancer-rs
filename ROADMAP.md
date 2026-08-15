@@ -207,10 +207,12 @@ OS-level cause found — no policy keys, default browser flags, media features
 present. For a user on such a player the dancer never learns anything is playing:
 `Idle`, not `Unscored`. This changes the `yamuse` calculus (§5.8).
 
-**Titles need real normalisation, immediately.** The first track tested came back as
-title `"Blur - Song 2 (Official Music Video)"`, artist `"Blur"` — needing both
-suffix stripping and de-duplication of the artist out of the title. That the very
-first specimen is awkward suggests it is the common case, not an edge case.
+**Titles vary wildly across sources** — the first track tested came back as title
+`"Blur - Song 2 (Official Music Video)"`, artist `"Blur"`. The initial reading was
+that this demands aggressive normalisation. That was wrong: canonicalising content
+merges different masters (`(Radio Edit)` is a different recording with a different
+grid), which is a false positive and worse than a miss. Hash the raw strings with
+encoding-level normalisation only, and verify duration on match — spec §5.1.
 
 Follow-up before M4 exits: sweep which players actually publish — Chrome, Firefox,
 Opera, Spotify desktop, AIMP, foobar2000, VLC. That list determines how much of
@@ -410,11 +412,16 @@ If they cannot tell, the premise needs re-examining before M4.
   refreshes only on state change.
 - Filter by `SourceAppUserModelId` against the configured allowlist.
 - **Library matching is the point of this milestone.** SMTC gives `(title, artist)`
-  and never a path, so normalise it and look it up in the `library` table from M2.
-  That lookup connects "the user pressed play in foobar2000" to "we analysed that
-  file last week" — it is what makes owned music work through the user's own
-  player (spec §8.3). Give the normalisation rules real tests and a fixture set of
-  awkward titles; this is where the owned-music path silently fails.
+  and never a path, so hash it and look it up in the `library` table from M2. That
+  lookup connects "the user pressed play in foobar2000" to "we analysed that file
+  last week" — it is what makes owned music work through the user's own player
+  (spec §8.3).
+- **Hash the raw strings; do not canonicalise content.** Trim, NFC and casefold
+  only. Stripping `(Radio Edit)` or `(Official Music Video)` merges different
+  masters with different grids — a false positive, which is worse than the false
+  negative of a miss (spec §5.1). Test that the *unsafe* merges do not happen, not
+  just that the safe ones do.
+- Verify duration on match, ±2 s. A hash hit with a disagreeing duration is a miss.
 - Scan the configured library folders and analyse what is found, on a worker.
 - Handle sessions publishing no timeline at all — drop to `Unscored`, since there
   is no audio fallback.

@@ -254,7 +254,7 @@ Two tables:
 | Table | Key | Value |
 |---|---|---|
 | `scores` | `{source}:{track_id}` | Score, serialised |
-| `library` | normalised `(title, artist)` | file path + score key |
+| `library` | `hash(title, artist)` | file path + duration + score key |
 
 Track IDs are namespaced per source. The same song from Spotify and from a local
 file gets two entries — masters differ, and a beat grid off by 40 ms looks broken.
@@ -262,6 +262,35 @@ file gets two entries — masters differ, and a beat grid off by 40 ms looks bro
 `library` exists because SMTC reports `(title, artist)`, never a path (§6.2). It is
 what lets an analysed local file be recognised when the user plays it through their
 own player. See §8.3.
+
+**The key is a hash of the raw strings — do not canonicalise the content.** Only
+encoding-level normalisation is permitted before hashing: trim, Unicode NFC,
+casefold. Those cannot merge two different recordings.
+
+Content-level normalisation is forbidden: stripping `(Radio Edit)`,
+`(Official Music Video)` or `- Remastered` merges entries that are *different
+masters with different grids*. That would contradict the rule above — the same song
+from two sources gets two entries on purpose.
+
+The failure modes are not symmetric:
+
+| Approach | Fails as | Cost |
+|---|---|---|
+| Canonicalise content | False **positive** | Wrong grid applied; dancer confidently off-beat, user cannot tell why |
+| Hash raw strings | False **negative** | Cache miss; dancer sits `Unscored`, one re-analysis |
+
+A miss is cheap and self-correcting. A mismatch looks like a bug. Prefer the miss —
+same reasoning as §8.3's "a confidently wrong grid is worse than none".
+
+The common case needs no cleverness anyway: when a local file is played through an
+ordinary player, SMTC reports *that file's own tags*, so the strings match exactly
+because they came from the same place. Variation appears across sources, and those
+are different masters that should not be merged.
+
+**Verify duration on match.** Store the track duration alongside each entry and
+compare against the source's reported `EndTime`, tolerance ±2 s. A hash hit with a
+disagreeing duration is treated as a miss. This costs nothing and catches the case
+where a player reports an album title while playing a radio edit.
 
 Because it is a single file, copying it elsewhere works. That is a property, not a
 feature: we neither build nor support sharing (§17.4).
@@ -368,10 +397,9 @@ a background video doesn't hijack the dancer.
   before M4 exits: Chrome, Firefox, Opera, Spotify desktop, AIMP, foobar2000, VLC.
 - **Track identity is `(title, artist)`, never a file path.** Normalise (trim,
   casefold, strip `- Remastered` style suffixes) and look the result up in the
-  `library` table (§5.1). The first specimen measured was title
-  `"Blur - Song 2 (Official Music Video)"` with artist `"Blur"` — needing both
-  suffix stripping *and* removal of the artist duplicated into the title. That the
-  first track tested was already awkward suggests this is the common case. That lookup is what connects "the user pressed play in
+  `library` table (§5.1), keyed on a hash of the raw strings. Encoding-level
+  normalisation only — trim, NFC, casefold — never content-level suffix stripping;
+  see §5.1 for why. Verify duration on match. That lookup is what connects "the user pressed play in
   foobar2000" to "we analysed that file last week" — it is the mechanism the whole
   owned-music path rests on (§8.3), so the normalisation rules deserve real tests
   and a fixture set of awkward titles.
