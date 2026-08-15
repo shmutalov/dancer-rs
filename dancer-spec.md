@@ -3,7 +3,8 @@
 **Working title:** `dancer-rs` (placeholder)
 **Target language:** Rust (2021 edition, MSRV 1.75+)
 **Primary platform:** Windows 10 2004+ / Windows 11
-**Status:** Draft v1 — design frozen enough to start M0
+**Status:** Draft v2 — stack decided, design frozen enough to start Phase 0
+**Plan:** see [ROADMAP.md](ROADMAP.md)
 
 ---
 
@@ -84,9 +85,9 @@ dancer-rs/
 │   ├── dancer-choreo/      Move selection, anticipation scheduling
 │   ├── dancer-source/      `Source` trait + adapters (smtc, spotify, yandex, file)
 │   ├── dancer-audio/       WASAPI loopback capture, ring buffer, level metering
-│   ├── dancer-analyze/     Reactive DSP + sidecar client for offline analysis
+│   ├── dancer-analyze/     beat-this grids, reactive DSP, optional sidecar client
 │   └── dancer-app/         Binary: wiring, tray icon, config, state machine
-└── sidecar/                Python: allin1 wrapper, JSON-over-stdio protocol
+└── sidecar/                Optional (M8). Python: allin1 wrapper for segment labels
 ```
 
 ### 3.2 Threading model
@@ -200,7 +201,7 @@ One JSON file per track, cached on disk, keyed by canonical track ID.
   "track_id": "spotify:4uLU6hMCjMI75M1A2tKUQC",
   "duration_ms": 214000,
   "bpm": 128.02,
-  "source": "allin1",
+  "source": "beat-this",
   "confidence": 0.91,
   "analyzed_at": "2026-08-12T10:04:00Z",
   "beats":         [0.331, 0.799, 1.268, "..."],
@@ -219,12 +220,19 @@ One JSON file per track, cached on disk, keyed by canonical track ID.
 
 Field notes:
 
-- `beats` / `beat_positions` / `downbeats` / `segments` map 1:1 onto `allin1`'s
-  output. Do not invent a different shape; ingest theirs verbatim and add fields.
-- `energy` is computed by the sidecar as normalised RMS over the segment.
+- `source` is one of `"beat-this"` (§8.1, the default path), `"allin1"` (§8.2, with
+  segment labels), or `"builtin"`.
+- `beats` / `beat_positions` / `downbeats` / `segments` keep `allin1`'s shape. Do
+  not invent a different one; `beat-this` output maps onto it directly (beat
+  numbers → `beat_positions`, number 1 → `downbeats`).
+- **`segments` may be empty**, and is whenever the score came from §8.1 alone.
+  Everything downstream must tolerate that — see §11.3.
+- `energy` is normalised RMS, computed over the segment where segments exist and
+  over the beat grid otherwise.
 - `cues` are derived, not from allin1: `build` is emitted for the last bar before a
   segment boundary where energy rises by more than a threshold; `drop` is the
-  boundary itself. These drive anticipation moves.
+  boundary itself. These drive anticipation moves. Without segments, derive
+  boundaries from novelty on the beat grid.
 - `confidence` gates entry into the `Locked` state. Below ~0.6, stay reactive.
 
 ### 5.1 Cache
@@ -305,25 +313,57 @@ device (phone, Connect speaker) where SMTC sees nothing.
 Disadvantages: rate-limited HTTP, ~1 s granularity, network latency in the
 `observed_at` pairing, requires user auth flow.
 
-**Verify before building:** Spotify's `audio-analysis` and `audio-features`
-endpoints historically returned a full beat/bar/section breakdown — which would
-be a drop-in replacement for the whole offline analysis pipeline — but access was
-restricted for new applications. Check current developer docs first. If open, add
-a `SpotifyAnalysisProvider` alongside the sidecar; if closed, this is only an
-identity/position source.
+**No longer a score source.** Spotify's `audio-analysis` and `audio-features`
+endpoints historically returned a full beat/bar/section breakdown, and access was
+restricted for new applications. This mattered when it looked like a drop-in
+replacement for the offline pipeline; with §8.1 computing grids locally, it
+doesn't. Treat Spotify purely as an identity/position source and don't spend time
+resolving its availability.
 
-### 6.4 Yandex Music adapter (optional)
+### 6.4 Yandex Music track ID resolver (optional)
 
-No official public API. Community wrappers exist around the internal API and
-require extracting an OAuth token from the desktop client or web session. Treat as
-a moving target: put it behind a feature flag, keep SMTC as the fallback for the
-same player, and do not let a Yandex API break take down the binary.
+Not a `Source`. The `yandex-music` crate (vyfor, MIT, maintained since June 2024)
+is a REST client: 13 API submodules, no websocket, no ynison. Its `queue` endpoint
+returns queue *contents*, not continuous playback position — so it cannot supply
+`position`, reliable `playing`, or a tight `observed_at` pairing.
+
+*Confidence: high but unverified — docs.rs coverage is 13.84%. Confirm in the
+source before building against it.*
+
+It earns its place in a different role. SMTC's weakest point is identity: §6.2
+resolves tracks by normalising and hashing `(title, artist)`, a pile of heuristics
+that will collide. So split the work:
+
+| Concern | Provider |
+|---|---|
+| Position, playing, timeline anchors | SMTC (event-driven, `LastUpdatedTime`) |
+| Stable track ID, canonical metadata | `yandex-music` (REST lookup) |
+
+Cache-key correctness is what makes learn-on-second-listen (§8.3) work at all, so
+this is worth more than it looks. Failure degrades gracefully: lose the resolver
+and you fall back to hashed strings, not to nothing.
+
+Still feature-flagged, still must not take down the binary. It wraps an
+undocumented internal API and needs an OAuth token extracted from the desktop
+client or web session — Rust removes the Python runtime, not the moving target.
+
+The `yamuse` crate has the ynison realtime WebSocket that this one lacks, which
+would make Yandex a push source with tighter anchors. At 12 days old and 75
+downloads it is not yet a dependency worth taking. Revisit if push-position proves
+necessary.
+
+**Do not reach the download endpoints.** Several Yandex wrappers expose lossless
+track downloads, which will look like an elegant fix for §8.3 — fetch the file,
+analyse it directly, skip loopback recording entirely. That is a considerably
+larger problem than the local capture §7.3 already ships disabled: retrieving
+masters from a CDN, not recording audio already playing. Keep `dancer-source`
+structurally unable to call them.
 
 ### 6.5 Local file adapter (development)
 
 Plays nothing; reads a WAV/MP3 path plus a simulated transport. Exists so the
 clock, scheduler and renderer can be tested deterministically without any
-streaming service in the loop. **Build this first** — M0 through M2 depend on it.
+streaming service in the loop. **Build this first** — M0 through M3 depend on it.
 
 ---
 
@@ -377,14 +417,35 @@ for streamed tracks.
 
 ## 8. Analysis
 
-### 8.1 Offline sidecar
+### 8.1 Primary analyzer (pure Rust)
 
-`allin1` (All-In-One Music Structure Analyzer, MIT) produces tempo, beats,
-downbeats, `beat_positions`, and labelled functional segments — intro, verse,
-chorus, bridge, outro — in one pass. It is PyTorch-based. **Do not attempt to port
-it to Rust.**
+`beat-this` (MIT) is a Rust port of the *Beat This!* tracker (ISMIR 2024), running
+on the `rten` runtime — no Python, no system libraries, `ort`/ONNX available behind
+a feature flag for cross-validation. It reports verified F-measure parity with the
+PyTorch reference for the standard model.
 
-Ship it as a subprocess sidecar speaking newline-delimited JSON over stdio:
+It emits beats and downbeats with beat numbers (1 = downbeat, 2–4 otherwise), which
+map directly onto `beats`, `downbeats` and `beat_positions`. `dancer-analyze` adds
+`energy` from RMS over the beat grid, and emits `source: "beat-this"`.
+
+This is the whole metrical half of the analysis, in-process, on any Windows machine
+with no install story. What it does **not** provide is functional segmentation, so
+scores from this path carry `segments: []` — see §11.3 for how the scheduler copes.
+
+*Maturity caveat: 1.0.0 as of May 2026, ~491 downloads/month. The parity claims are
+the author's. Validate against known-BPM material before building on it; the
+fallback is `ort` with an ONNX export of the upstream weights.*
+
+### 8.2 Optional sidecar for segment labels
+
+`allin1` (All-In-One Music Structure Analyzer, MIT) is the only credible source of
+labelled functional segments — intro, verse, chorus, bridge, outro. It is
+PyTorch-based, runs source separation first, and depends on NATTEN, which on
+Windows must be built from source. **Do not attempt to port it to Rust.**
+
+It is therefore *optional enrichment*, not the primary path: a subprocess sidecar
+speaking newline-delimited JSON over stdio, supplying `segments` and `cues` on top
+of a grid §8.1 already produced.
 
 ```
 → {"cmd":"analyze","job":7,"path":"C:\\...\\track.wav","track_id":"..."}
@@ -392,23 +453,15 @@ Ship it as a subprocess sidecar speaking newline-delimited JSON over stdio:
 ← {"job":7,"status":"done","score":{ ... }}
 ```
 
-The sidecar also computes the `energy` and `cues` fields, which allin1 does not
-provide.
+NATTEN remains a barrier, but now for a feature rather than for the product. A
+native Rust route exists in principle — Demucs has Rust ports (`demucs-rs`,
+`charon-audio`) and neighborhood attention is expressible as masked attention —
+but weight porting plus per-layer numerical validation is a research project, and
+a per-track stem separation pass is a steep price for section *names*.
 
-**Known deployment risk:** allin1 depends on NATTEN, which on Windows must be
-built from source. This is a genuine barrier for end users. Mitigations, in order
-of preference: ship a prebuilt sidecar bundle with a frozen environment; offer WSL
-as a documented alternative; or make the sidecar entirely optional and accept
-reduced quality from the built-in analyzer below.
-
-### 8.2 Built-in fallback analyzer (pure Rust)
-
-Because the sidecar may be absent, `dancer-analyze` implements a degraded
-offline path in Rust: spectral flux onset envelope → autocorrelation for tempo →
-comb-filter phase estimation for downbeats → fixed 8-bar blocks in place of real
-segmentation, with energy tiers from RMS. Produces the same `Score` struct with
-`source: "builtin"` and lower `confidence`. Good enough to beat-lock; not good
-enough to know a chorus is coming.
+`oximedia-mir` advertises structural segmentation in pure Rust. Its breadth
+(tempo, key, chord, melody, structure, genre, mood) against its version and
+adoption does not survive scrutiny; benchmark before trusting it.
 
 ### 8.3 Learn-on-second-listen
 
@@ -562,6 +615,17 @@ Given the segment label at the target beat and its energy:
 3. Exclude the row used in the previous bar (no immediate repeats).
 4. Weighted random from what remains; fall back to `default_row` if empty.
 
+**Unlabelled scores.** Scores from §8.1 have no segments, so step 1 has nothing to
+match on. Selection then keys on **energy tier and boundary position** instead,
+with labels treated as enrichment when present: bucket the local RMS into tiers,
+pick from rows whose `energy` sits in the current tier, and treat a novelty peak on
+a downbeat as a boundary for cue purposes.
+
+This is the mechanism that lets the project ship without segmentation. The
+scheduler needs to know that energy rose at a downbeat — not that the section is
+called a chorus. Labels sharpen pool selection; they do not affect timing, and
+timing is the whole thesis.
+
 Overrides, in priority order:
 
 - A `build` cue in the score → force a row from the `build` pool for that bar.
@@ -644,17 +708,31 @@ change_on_downbeat_only = true
 
 | # | Deliverable | Exit criterion |
 |---|---|---|
+**See [ROADMAP.md](ROADMAP.md)** for the working plan: per-milestone task
+breakdowns, Phase 0 de-risking spikes, and the stack decisions behind them. Summary
+table below.
+
+| # | Deliverable | Exit criterion |
+|---|---|---|
 | **M0** | Window + sprite playback | FAOSDance parity: loads an existing sheet + `.txt`, loops at fixed fps, transparent, click-through, draggable |
 | **M1** | Local file source + BeatClock | Hand-written score JSON drives a beat-locked dance against a local WAV; visually in time for 3 min with no drift |
-| **M2** | Anticipation scheduler | `impact_cell` respected; A/B against M1 shows the difference is visible |
-| **M3** | SMTC source | Identity, position and pause/resume from Spotify desktop; correct freeze and resume-on-downbeat behaviour |
-| **M4** | WASAPI loopback | Per-process capture, silence watchdog, offset calibration producing a stable measured value |
-| **M5** | Analysis pipeline | Sidecar + built-in fallback; score cache; end-to-end on a local file |
+| **M2** | Real analyzer + score cache | `beat-this` produces a score from a local file, cached to disk, indistinguishable in use from the hand-written one |
+| **M3** | Anticipation scheduler | `impact_cell` respected; A/B against M1 shows the difference is visible |
+| **M4** | SMTC source | Identity, position and pause/resume from Spotify desktop; correct freeze and resume-on-downbeat behaviour |
+| **M5** | WASAPI loopback | Per-process capture, silence watchdog, offset calibration producing a stable measured value |
 | **M6** | Learn-on-second-listen | An unknown streamed track is reactive on play 1 and locked on play 2 |
-| **M7** | Spotify + Yandex adapters, tray UI | Auth flows, source failover, config UI |
+| **M7** | Tray UI, config, packaging | Installable by a stranger |
+| **M8** | *Optional:* segment labels, Yandex resolver, Spotify | Only if M7 shows unlabelled pools are the visible gap |
 
-M0–M2 need no audio subsystem and no network. Most of the interesting work is
-there. Do not start M3 until M2 looks right against a local file.
+Analysis moved ahead of the scheduler: it stopped being a Python deployment problem
+(§8.1) and became a crate call, and testing anticipation against *real* grids —
+with their jitter and drift — is a much sharper test than testing it against a
+fixture authored to be correct.
+
+M0–M3 need no audio subsystem and no network. Most of the interesting work is
+there. **Do not start M4 until M3 looks right against a local file.** M3 is the
+gate: everything before it is a sprite player with a metronome, everything after is
+plumbing to feed it.
 
 ---
 
@@ -667,9 +745,13 @@ there. Do not start M3 until M2 looks right against a local file.
 | `image` | PNG decode |
 | `windows` | SMTC, WASAPI, layered window styles |
 | `wasapi` | Loopback capture (verify per-process support) |
+| `beat-this` | Beat + downbeat tracking (§8.1) |
+| `rten` | ML runtime backing `beat-this`; `ort` behind a feature flag for cross-check |
+| `symphonia` / `rubato` | Audio decode and resampling (arrive via `beat-this`) |
 | `realfft` / `rustfft` | Spectral analysis |
 | `tokio` + `reqwest` | Async source polling |
-| `rspotify` | Spotify Web API + OAuth PKCE |
+| `rspotify` | Spotify Web API + OAuth PKCE (M8) |
+| `yandex-music` | Yandex track ID resolution (M8, §6.4) |
 | `serde` / `serde_json` / `toml` | Score, manifest, config |
 | `crossbeam-channel` | Thread messaging |
 | `notify` | Config and artwork hot reload |
@@ -684,10 +766,13 @@ there. Do not start M3 until M2 looks right against a local file.
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| Spotify `audio-analysis` unavailable | Lose the free score path | Sidecar is the primary path anyway; treat Spotify analysis as a bonus |
-| NATTEN build on Windows | Users can't install the sidecar | Prebuilt bundle; WSL path; built-in analyzer fallback |
-| Yandex internal API changes | Adapter breaks | Feature flag; SMTC covers the same player |
+| `beat-this` quality below its claims | The whole grid path is suspect | Validate in Phase 0 against known-BPM material before building on it; fall back to `ort` + ONNX export of upstream weights |
+| No functional segmentation available | Pools can't key on section labels | Energy-tier selection (§11.3); labels are enrichment, not timing. Optional sidecar in M8 |
+| NATTEN build on Windows | Optional segment labels unavailable | No longer blocks the product (§8.2). Ship without labels |
+| winit gives colour-keying, not per-pixel alpha | Sprite edges look wrong | Settle in Phase 0; fall back to `UpdateLayeredWindow` before M0 rather than retrofitting |
+| Yandex internal API changes | ID resolution breaks | Feature flag; SMTC still supplies position and identity, degraded to hashed strings |
 | Recording legality / ToS | Feature must ship disabled | Off by default, explicit opt-in, local-only, WAV deleted after analysis |
+| Track download endpoints used for analysis | Substantially worse ToS exposure than §7.3 | Keep `dancer-source` structurally unable to reach them (§6.4) |
 | SMTC session ambiguity | Wrong app drives the dancer | Allowlist + explicit source selection in tray |
 | Per-process loopback unsupported | Noisy capture | Full-mix fallback; onset detection on a bandpassed low band is fairly robust |
 | Sheets lack `impact_cell` | No anticipation, back to FAOSDance behaviour | Ship an annotated default sheet; add a small cell-picker tool in M7 |
@@ -696,13 +781,18 @@ there. Do not start M3 until M2 looks right against a local file.
 
 ## 17. Open questions
 
-1. Is Spotify's `audio-analysis` endpoint available to new apps as of now? Resolve
-   before M5 — it changes the sidecar's priority substantially.
+1. ~~Is Spotify's `audio-analysis` endpoint available to new apps?~~ **Resolved:
+   moot.** §8.1 computes our own grids, so the answer no longer changes anything.
 2. Should `Reactive` mode exist at all in v1, or is idle-until-known acceptable?
-   It's a meaningful chunk of DSP work for a mode users may rarely see.
+   It's a meaningful chunk of DSP work for a mode users may rarely see. **Defer to
+   M6** — real scores cover local files from M2, so the mode's actual exposure
+   isn't knowable until streamed tracks are in play.
 3. Sheet compatibility: is 8 cells worth keeping as a hard constraint, or should
-   the manifest allow arbitrary widths with 8 as the default? Keeping it costs
-   nothing and buys the whole existing sheet library.
+   the manifest allow arbitrary widths with 8 as the default? **Keep it**, with the
+   manifest free to override later. Costs nothing and buys the whole existing
+   sheet library.
 4. Should scores be shareable — a small community repo of analysed track IDs — so
    users skip the learn-on-second-listen step? Distributing derived beat grids is
-   likely fine; worth a closer look before designing for it.
+   likely fine; worth a closer look before designing for it. Not before M7.
+5. Rust edition and MSRV. §1 says 2021 / 1.75+, written before this dependency set;
+   edition 2024 (Rust 1.85+) is likely the better default. Settle before `cargo new`.
