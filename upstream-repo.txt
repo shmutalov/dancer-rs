@@ -1,1 +1,2 @@
 D:\Projects\other\FAOSDance
+D:\Projects\other\yandex-music-api
