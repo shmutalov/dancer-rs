@@ -797,6 +797,17 @@ start_time = target_beat_time
 `render_latency` is one frame of the display loop (~16 ms at 60 Hz), plus the
 compositor's delay. Measure it; don't assume.
 
+**Half of it cannot be measured, and that is fine** (M3). Present cost — from
+deciding to draw to `UpdateLayeredWindow` returning — is timed per frame and kept as
+a rolling median, plus half the tick interval since a cell change becomes visible at
+the next tick. The compositor's delay from that call returning to photons leaving
+the panel is **not observable from inside the process**: DWM composites on its own
+schedule and nothing the app can call reports scan-out. That residue is a constant,
+and §9.2's offset slider exists precisely to absorb constants — the user trims by
+eye until the dancer looks right, and DWM's share is inside that number whether it
+is modelled or not. Getting this term slightly wrong is survivable; getting
+`impact_cell × frame_duration` wrong is not, and that one is exact.
+
 The scheduler runs a lookahead window of ~2 s and maintains a small queue:
 
 ```rust
@@ -820,6 +831,16 @@ Given the segment label at the target beat and its energy:
 2. Filter by energy proximity: `|row.energy - segment.energy| < 0.35`.
 3. Exclude the row used in the previous bar (no immediate repeats).
 4. Weighted random from what remains; fall back to `default_row` if empty.
+
+**Step 2 needs a widening rule** (M3). A hard threshold assumes the track has
+dynamics. Measured on an analysed track sitting at 0.89 energy throughout, exactly
+one row of the default sheet fell inside the window, so the dancer repeated one move
+for the whole track — the FAOSDance behaviour this project exists to beat. Loudness-
+war masters do this to real music too. So when the window leaves fewer than two
+candidates, widen to the nearest few by energy distance, **capped at twice the
+window**: reaching further would put a full-energy spin in a quiet intro, which is a
+worse failure than repeating a move. Rank ties break on row index, so a
+choreography stays reproducible from its seed.
 
 **Unlabelled scores.** Scores from §8.1 have no segments, so step 1 has nothing to
 match on. Selection then keys on **energy tier and boundary position** instead,

@@ -234,7 +234,7 @@ M4's value is real.
 | **M0** | Window + sprite playback — **done 2026-08-15** | FAOSDance parity: loads an existing sheet + `.txt`, fixed-fps loop, transparent, click-through, draggable |
 | **M1** | Local file source + BeatClock — **done 2026-08-15** | Hand-written score JSON drives a beat-locked dance against a local WAV; no visible drift over 3 min |
 | **M2** | Real analyzer + score cache — **done 2026-08-15** | `beat-this` produces a score from a local file, cached to disk, indistinguishable in use from the hand-written one |
-| **M3** | **Anticipation scheduler** | `impact_cell` respected; A/B against M1 shows a difference visible to someone not told what changed |
+| **M3** | **Anticipation scheduler** — built 2026-08-15, **A/B not yet judged** | `impact_cell` respected; A/B against M1 shows a difference visible to someone not told what changed |
 | **M4** | SMTC source | Identity, position and pause/resume from Spotify desktop; correct freeze and resume-on-downbeat |
 | **M5** | Tray UI, config, packaging | Installable by a stranger |
 | **M6** | *Optional:* segment labels, Spotify, Yandex resolver | Only if M5 shows unlabelled pools are the visible gap |
@@ -477,6 +477,52 @@ called a chorus.
 
 **Exit:** A/B against M1. Show both to someone who has not been told what changed.
 If they cannot tell, the premise needs re-examining before M4.
+
+#### Built 2026-08-15 — the exit criterion is still open
+
+The mechanism works and is measured. Whether it is *visible* is a judgement only a
+person can make, and nobody has made it yet. **Middle-click toggles anticipation on
+and off at runtime**, on the same track, which is the only honest way to run that
+comparison; `--no-anticipate` starts in M1 mode.
+
+Measured on a 124 BPM track with the default sheet:
+
+| Row | `impact_cell` | `beats_per_loop` | Predicted lead | Measured |
+|---|---|---|---|---|
+| spin | 4 | 2 | 484 ms | 484 ms |
+| bounce | 3 | 1 | 181 ms | 184 ms |
+
+The 3 ms difference is measured render latency. Bars landed 1.935 s apart, which is
+four beats at that tempo.
+
+**`render_latency` is measured, but only the half that can be.** Present cost is
+timed per frame and kept as a rolling median; the compositor's delay between
+`UpdateLayeredWindow` returning and photons leaving the panel is **not observable
+from inside the process**. That part is a constant, and a constant is exactly what
+§9.2's offset slider absorbs — so mis-estimating it is not fatal, while getting
+`impact_cell × frame_duration` wrong would be, and that one is exact.
+
+**Running it found a flat-energy failure.** The analysed test track sat at 0.89
+energy throughout, which put exactly one row of the default sheet inside the ±0.35
+window — so the dancer repeated a single move for the whole track, which is the
+FAOSDance behaviour this project exists to beat. Loudness-war masters do the same to
+real music, so it is not only a synthetic-signal problem. Selection now widens to
+the nearest few rows when the strict window leaves fewer than two, capped at twice
+the window so a full-energy spin cannot land in a quiet intro. After the fix the
+same track alternates spin and bounce.
+
+**A startup gap, also found by running it.** `plan` skipped a bar starting exactly
+at the current position, so a track beginning on a downbeat had nothing scheduled
+for its entire first bar. The planning window now reaches back rather than starting
+at the playhead.
+
+**Move selection is seeded and the seed is logged.** A choreography judged by eye
+has to be reproducible to be debuggable, and `rand` would not have given that for
+free.
+
+Deliberately deferred: hiding a hard re-anchor at a loop boundary, which is the
+resolution to spec §9.1's contradiction with §9 and needs the scheduler that now
+exists. It is a real remaining defect, not a finished item.
 
 ---
 

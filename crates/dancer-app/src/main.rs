@@ -19,7 +19,7 @@ use anyhow::Context;
 use crossbeam_channel::{Receiver, Sender};
 use dancer_render::{
     apply_window_styles, capture_owner, hwnd_of, present, primary_button_down, reassert_topmost,
-    surface_size, Surface,
+    surface_size, LatencyMonitor, Surface,
 };
 use dancer_score::Score;
 use dancer_source::{FileSource, Source};
@@ -132,10 +132,26 @@ fn main() -> anyhow::Result<()> {
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Wait);
 
+    let rows = row_info(&sheet);
+    let mut playback = Playback::new(
+        Instant::now(),
+        cfg.playback.offset_secs,
+        rows,
+        sheet.default_row,
+        // Seeded from the wall clock so successive runs choreograph differently,
+        // but reported so a run can be reproduced from its log (spec §11.3's
+        // weighted random is otherwise impossible to debug by eye).
+        seed(),
+    );
+    if args.no_anticipate {
+        playback.toggle_anticipation();
+    }
+
     let mut app = App {
         row: sheet.default_row,
         sheet,
-        playback: Playback::new(Instant::now(), cfg.playback.offset_secs),
+        playback,
+        latency: LatencyMonitor::new(GRID_TICK),
         cfg,
         dir,
         rx,
@@ -150,6 +166,36 @@ fn main() -> anyhow::Result<()> {
     };
     event_loop.run_app(&mut app)?;
     Ok(())
+}
+
+/// Describe the sheet's rows to the scheduler (spec §4.2, §11.3).
+fn row_info(sheet: &Sheet) -> Vec<dancer_choreo::RowInfo> {
+    sheet
+        .rows
+        .iter()
+        .enumerate()
+        .map(|(i, r)| dancer_choreo::RowInfo {
+            index: i,
+            name: r.name.clone(),
+            cells: r.cells.len(),
+            beats_per_loop: r.beats_per_loop,
+            impact_cell: r.impact_cell,
+            pools: r.pools.to_vec(),
+            energy: r.energy,
+            loopable: r.loopable,
+            held: Some(i) == sheet.held_row,
+        })
+        .collect()
+}
+
+/// Seed for move selection, logged so a session can be reproduced.
+fn seed() -> u64 {
+    let s = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0x5EED);
+    tracing::info!(seed = s, "choreography seed");
+    s
 }
 
 /// Build the simulated transport (spec §6.5).
@@ -231,6 +277,7 @@ struct App {
     dir: PathBuf,
     sheet: Sheet,
     playback: Playback,
+    latency: LatencyMonitor,
     rx: Receiver<AppEvent>,
     window: Option<Window>,
     hwnd: Option<HWND>,
@@ -352,9 +399,16 @@ impl App {
             self.cfg.sprite.mirror,
         );
 
+        // Spec §11.2 says to measure display latency rather than assume 16 ms.
+        // This is the measurable half; see `dancer_render::latency` for what is
+        // not, and why that is acceptable.
+        let t0 = Instant::now();
         if let Err(e) = present(hwnd, surface, self.cfg.sprite.opacity) {
             tracing::error!(error = %e, "present failed");
         }
+        self.latency.record(t0.elapsed());
+        self.playback
+            .set_render_latency(self.latency.render_latency().as_secs_f64());
     }
 
     /// Drain the source thread's messages into the state machine.
@@ -380,7 +434,34 @@ impl App {
         // Dragging owns the sprite: the Held row is a single pose, and letting the
         // grid drive it would fight the interaction.
         if self.drag.is_none() {
+            // Anticipation first: a scheduled move names both the row and the cell.
+            if let Some(f) = self.playback.frame(now) {
+                if f.row != self.row {
+                    // Log the lead: how far ahead of its target beat this move
+                    // began. That number *is* the milestone, so it should be
+                    // visible rather than inferred.
+                    if let Some(m) = self.playback.current_move() {
+                        tracing::debug!(
+                            row = %self.sheet.rows.get(f.row).map(|r| r.name.as_str()).unwrap_or("?"),
+                            lead_ms = ((m.target_beat - m.start_at) * 1000.0).round(),
+                            target_beat = m.target_beat,
+                            "move"
+                        );
+                    }
+                }
+                if f.row != self.row || f.cell != self.cell {
+                    self.row = f.row.min(self.sheet.rows.len().saturating_sub(1));
+                    self.cell = f.cell;
+                    self.draw();
+                }
+                return now + GRID_TICK;
+            }
+            // Nothing scheduled — a gap between moves, or anticipation off. Fall
+            // back to M1: loop the default row against the grid.
             if let Some(cell) = self.playback.grid_cell(now, self.beats_per_loop(), cells) {
+                if self.row != self.sheet.default_row {
+                    self.row = self.sheet.default_row;
+                }
                 if cell != self.cell {
                     self.cell = cell;
                     self.draw();
@@ -501,6 +582,7 @@ impl ApplicationHandler for App {
             pos = ?self.pos,
             fps = self.cfg.sprite.fps,
             offset_secs = self.cfg.playback.offset_secs,
+            anticipate = self.playback.anticipating(),
             beats_per_loop = self.beats_per_loop(),
             click_through = self.cfg.window.click_through,
             "window up"
@@ -531,6 +613,14 @@ impl ApplicationHandler for App {
                 match (button, state) {
                     (MouseButton::Left, ElementState::Pressed) => self.begin_drag(),
                     (MouseButton::Left, ElementState::Released) => self.end_drag(),
+                    // The A/B switch (ROADMAP M3). Middle-click flips between
+                    // anticipation and M1's plain loop on the same track, which is
+                    // the only way to judge the difference honestly — described,
+                    // it sounds like a detail; seen back to back, it is the point.
+                    (MouseButton::Middle, ElementState::Pressed) => {
+                        let on = self.playback.toggle_anticipation();
+                        tracing::info!(anticipate = on, "A/B toggle");
+                    }
                     // M1 still has no tray, and WS_EX_NOACTIVATE means no keyboard
                     // — so right-click is the only way out. Replaced in M5.
                     (MouseButton::Right, ElementState::Pressed) => {

@@ -24,6 +24,9 @@ pub struct Args {
     pub models: Option<PathBuf>,
     /// Skip the score cache entirely: always re-analyse, never write.
     pub no_cache: bool,
+    /// Start with anticipation off — M1's plain grid loop. Middle-click toggles it
+    /// at runtime, which is how the M3 A/B is actually judged.
+    pub no_anticipate: bool,
     /// Run the simulated transport off nominal speed, to give the clock real drift
     /// to absorb. Dev lever for exercising spec §9.1.
     pub rate: Option<f64>,
@@ -38,6 +41,7 @@ dancer-rs [SHEET.png] [options]
   --score <FILE.json>   Use this beat grid instead of analysing
   --models <DIR>        ONNX weights directory (default: <data dir>/models)
   --no-cache            Always re-analyse; do not read or write scores.db
+  --no-anticipate       Start without anticipation (middle-click toggles it)
   --rate <F>            Simulated transport speed, 1.0 nominal
   --stale <SECS>        Report positions this many seconds old
   -h, --help            This text
@@ -57,6 +61,7 @@ pub fn parse<I: Iterator<Item = String>>(args: I) -> Result<Args, String> {
             "--audio" => out.audio = Some(PathBuf::from(value("--audio")?)),
             "--models" => out.models = Some(PathBuf::from(value("--models")?)),
             "--no-cache" => out.no_cache = true,
+            "--no-anticipate" => out.no_anticipate = true,
             "--rate" => {
                 let v = value("--rate")?;
                 out.rate = Some(v.parse().map_err(|_| format!("--rate: {v} is not a number"))?);

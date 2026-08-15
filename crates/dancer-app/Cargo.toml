@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 dancer-analyze = { path = "../dancer-analyze" }
+dancer-choreo = { path = "../dancer-choreo" }
 dancer-clock = { path = "../dancer-clock" }
 dancer-render = { path = "../dancer-render" }
 dancer-score = { path = "../dancer-score" }

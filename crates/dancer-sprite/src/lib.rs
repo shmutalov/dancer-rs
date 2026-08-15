@@ -66,6 +66,13 @@ pub struct Row {
     /// Cell whose artwork is the move's accent — the one that must land *on* the
     /// beat (spec §11.2). Carried from M0; the scheduler that uses it is M3.
     pub impact_cell: u32,
+    /// Segment labels this row suits, e.g. `["chorus"]` (spec §11.3).
+    pub pools: Arc<[String]>,
+    /// Where this row sits on the energy scale, `0.0..1.0`. `None` when the sheet
+    /// declares nothing — most inherited sheets, which have no manifest at all.
+    pub energy: Option<f32>,
+    /// Whether the row can repeat. A one-shot returns to the default row when done.
+    pub loopable: bool,
 }
 
 /// A loaded sprite sheet, ready to blit.
@@ -169,12 +176,15 @@ impl Sheet {
                 })
                 .collect();
 
-            let timing = manifest.as_ref().and_then(|m| m.row_timing(r as usize));
+            let rm = manifest.as_ref().and_then(|m| m.row_at(r as usize));
             rows.push(Row {
                 name,
                 cells: cells.into(),
-                beats_per_loop: timing.map_or(1, |t| t.0.max(1)),
-                impact_cell: timing.map_or(0, |t| t.1),
+                beats_per_loop: rm.map_or(1, |m| m.beats_per_loop.max(1)),
+                impact_cell: rm.map_or(0, |m| m.impact_cell),
+                pools: rm.map(|m| m.pools.clone().into()).unwrap_or_else(|| Vec::new().into()),
+                energy: rm.and_then(|m| m.energy),
+                loopable: rm.is_none_or(|m| m.loopable),
             });
         }
 

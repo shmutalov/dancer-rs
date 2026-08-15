@@ -19,7 +19,9 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 
+pub mod latency;
 pub mod surface;
+pub use latency::LatencyMonitor;
 pub use surface::{client_size, surface_size, Surface};
 
 #[derive(Debug, thiserror::Error)]

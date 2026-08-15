@@ -6,6 +6,7 @@
 
 use std::time::Instant;
 
+use dancer_choreo::{Frame, RowInfo, Scheduler};
 use dancer_clock::{BeatClock, Correction};
 use dancer_score::TrackMeta;
 
@@ -51,16 +52,42 @@ pub struct Playback {
     /// Consecutive observations that agreed after a seek. Spec §10 requires two
     /// before `Resync` returns to `Locked`.
     agreements: u8,
+    scheduler: Scheduler,
+    /// When false, the scheduler is bypassed and the dancer loops one row off the
+    /// grid — M1's behaviour exactly. This is the A/B switch M3 exits on.
+    anticipate: bool,
 }
 
 impl Playback {
-    pub fn new(now: Instant, offset: f64) -> Self {
+    pub fn new(now: Instant, offset: f64, rows: Vec<RowInfo>, fallback: usize, seed: u64) -> Self {
         Self {
             state: State::Idle,
             clock: BeatClock::new(now, offset),
             track: None,
             agreements: 0,
+            scheduler: Scheduler::new(rows, fallback, seed),
+            anticipate: true,
         }
+    }
+
+    pub fn set_render_latency(&mut self, secs: f64) {
+        self.scheduler.set_render_latency(secs);
+    }
+
+    pub fn anticipating(&self) -> bool {
+        self.anticipate
+    }
+
+    /// Flip between anticipation and M1's plain grid loop.
+    ///
+    /// Exists for the A/B in ROADMAP M3: the difference is meant to be visible to
+    /// someone who has not been told what changed, and that is much easier to
+    /// judge when both can be seen back to back on the same track.
+    pub fn toggle_anticipation(&mut self) -> bool {
+        self.anticipate = !self.anticipate;
+        self.scheduler.reset();
+        tracing::info!(anticipate = self.anticipate, "anticipation toggled");
+        self.anticipate
     }
 
     /// Fold one message in. Returns true if the state changed.
@@ -72,6 +99,8 @@ impl Playback {
                 self.track = Some(meta);
                 self.clock.set_score(None);
                 self.agreements = 0;
+                // Queued moves belong to a track that is no longer playing.
+                self.scheduler.reset();
                 // From any state (spec §10). Queued moves are cancelled by having
                 // no score to schedule against.
                 self.state = State::Identifying;
@@ -122,6 +151,8 @@ impl Playback {
             Correction::Seek { err } => {
                 tracing::debug!(err, "seek detected");
                 self.agreements = 0;
+                // Everything queued was planned for a position we are no longer at.
+                self.scheduler.reset();
                 if self.state == State::Locked {
                     self.state = State::Resync;
                 }
@@ -172,6 +203,27 @@ impl Playback {
         let progress = score.loop_progress(self.clock.position(now), beats_per_loop)?;
         Some(((progress * cells as f64) as usize).min(cells - 1))
     }
+
+    /// The row and cell to show at `now`, from the anticipation scheduler.
+    ///
+    /// `None` means nothing is scheduled — a non-`Locked` state, anticipation
+    /// switched off, or a gap between moves. The caller falls back to
+    /// [`Playback::grid_cell`] on the default row, which is M1's behaviour and
+    /// keeps the dancer moving rather than freezing.
+    pub fn frame(&mut self, now: Instant) -> Option<Frame> {
+        if !self.anticipate || !self.state.is_grid_driven() {
+            return None;
+        }
+        let score = self.clock.score()?.clone();
+        let pos = self.clock.position(now);
+        self.scheduler.plan(&score, pos);
+        self.scheduler.frame_at(pos)
+    }
+
+    /// The move currently playing, for diagnostics.
+    pub fn current_move(&self) -> Option<&dancer_choreo::ScheduledMove> {
+        self.scheduler.current()
+    }
 }
 
 #[cfg(test)]
@@ -182,6 +234,35 @@ mod tests {
     use dancer_score::{Score, ScoreSource, TrackId, SCHEMA};
 
     use super::*;
+
+    /// Two rows: a quiet loop with its accent on cell 0, and a bounce whose accent
+    /// is cell 3 — the one that makes anticipation observable.
+    fn test_rows() -> Vec<RowInfo> {
+        vec![
+            RowInfo {
+                index: 0,
+                name: "idle".into(),
+                cells: 8,
+                beats_per_loop: 2,
+                impact_cell: 0,
+                pools: vec![],
+                energy: Some(0.15),
+                loopable: true,
+                held: false,
+            },
+            RowInfo {
+                index: 1,
+                name: "bounce".into(),
+                cells: 8,
+                beats_per_loop: 1,
+                impact_cell: 3,
+                pools: vec![],
+                energy: Some(0.55),
+                loopable: true,
+                held: false,
+            },
+        ]
+    }
 
     fn score(confidence: f32) -> Arc<Score> {
         // 120 BPM, 4/4, three minutes.
@@ -214,7 +295,7 @@ mod tests {
     }
 
     fn locked(now: Instant) -> Playback {
-        let mut p = Playback::new(now, 0.0);
+        let mut p = Playback::new(now, 0.0, test_rows(), 0, 42);
         p.apply(AppEvent::TrackChanged {
             id: meta().id,
             meta: meta(),
@@ -232,9 +313,89 @@ mod tests {
     }
 
     #[test]
+    fn anticipation_starts_the_move_before_the_beat() {
+        // M3 end to end through the state machine: the impact cell must be on
+        // screen at the target beat, which means the move began before it.
+        let now = Instant::now();
+        let mut p = locked(now);
+
+        // Drive the loop as the app does, sampling every 8 ms.
+        let mut first_bounce: Option<(f64, usize)> = None;
+        for tick in 0..500u64 {
+            let at = now + Duration::from_millis(tick * 8);
+            if let Some(f) = p.frame(at) {
+                if f.row == 1 && first_bounce.is_none() {
+                    first_bounce = Some((tick as f64 * 0.008, f.cell));
+                }
+            }
+        }
+
+        let m = p.current_move().expect("a move should be scheduled");
+        assert!(
+            m.start_at < m.target_beat,
+            "move starts at {} for a beat at {}",
+            m.start_at,
+            m.target_beat
+        );
+    }
+
+    #[test]
+    fn the_impact_cell_is_on_screen_at_the_target_beat() {
+        let now = Instant::now();
+        let mut p = locked(now);
+        p.frame(now); // plan
+
+        let m = p.current_move().cloned().expect("scheduled");
+        let impact_cell = test_rows()[m.row].impact_cell;
+        // Sample at the exact target beat.
+        let at = now + Duration::from_secs_f64(m.target_beat);
+        let f = p.frame(at).expect("a frame at the target beat");
+        assert_eq!(
+            f.cell, impact_cell as usize,
+            "row {} should be showing cell {impact_cell} on its beat",
+            m.row
+        );
+    }
+
+    #[test]
+    fn toggling_anticipation_falls_back_to_the_m1_loop() {
+        // The A/B switch. With anticipation off, `frame` yields nothing and the
+        // caller drives the default row off the grid, exactly as M1 did.
+        let now = Instant::now();
+        let mut p = locked(now);
+        assert!(p.frame(now).is_some());
+
+        assert!(!p.toggle_anticipation());
+        assert!(p.frame(now).is_none(), "anticipation off means no scheduled frame");
+        assert!(p.grid_cell(now, 4, 8).is_some(), "but the grid loop still runs");
+
+        assert!(p.toggle_anticipation());
+        assert!(p.frame(now).is_some());
+    }
+
+    #[test]
+    fn a_seek_discards_moves_planned_for_the_old_position() {
+        let now = Instant::now();
+        let mut p = locked(now);
+        p.frame(now);
+        assert!(p.current_move().is_some());
+
+        p.apply(AppEvent::PositionReport {
+            pos_secs: 90.0,
+            playing: true,
+            at: now + Duration::from_secs(1),
+        });
+        assert_eq!(p.state, State::Resync);
+        assert!(
+            p.current_move().is_none(),
+            "moves planned around 0 s must not survive a jump to 90 s"
+        );
+    }
+
+    #[test]
     fn low_confidence_score_stays_unscored() {
         let now = Instant::now();
-        let mut p = Playback::new(now, 0.0);
+        let mut p = Playback::new(now, 0.0, test_rows(), 0, 42);
         p.apply(AppEvent::TrackChanged { id: meta().id, meta: meta() });
         assert_eq!(p.state, State::Identifying);
         p.apply(AppEvent::ScoreReady { id: meta().id, score: score(0.5) });
@@ -245,7 +406,7 @@ mod tests {
     #[test]
     fn stale_score_for_an_old_track_is_ignored() {
         let now = Instant::now();
-        let mut p = Playback::new(now, 0.0);
+        let mut p = Playback::new(now, 0.0, test_rows(), 0, 42);
         p.apply(AppEvent::TrackChanged { id: meta().id, meta: meta() });
         p.apply(AppEvent::ScoreReady {
             id: TrackId::new("file", "something-else.wav"),
