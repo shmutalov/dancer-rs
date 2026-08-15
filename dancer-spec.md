@@ -347,10 +347,16 @@ Still feature-flagged, still must not take down the binary. It wraps an
 undocumented internal API and needs an OAuth token extracted from the desktop
 client or web session — Rust removes the Python runtime, not the moving target.
 
-The `yamuse` crate has the ynison realtime WebSocket that this one lacks, which
-would make Yandex a push source with tighter anchors. At 12 days old and 75
-downloads it is not yet a dependency worth taking. Revisit if push-position proves
-necessary.
+**If ynison is ever needed, the crate changes.** The `yamuse` crate has the ynison
+realtime WebSocket that this one lacks, which would make Yandex a push source with
+tighter anchors than SMTC's event-driven timeline. The two are not interchangeable
+behind a feature flag — different author, API shape and transport — so this is a
+swap, and it belongs at implementation time rather than now. Whether SMTC's anchors
+suffice for Yandex Music desktop is not knowable until M4 has run against it.
+
+Design accordingly: keep the resolver behind a narrow internal interface, and do
+not let REST polling assumptions leak into the `Source` trait. §6.1 already takes
+`observed_at` per observation, which a push transport satisfies naturally.
 
 **Do not reach the download endpoints.** Several Yandex wrappers expose lossless
 track downloads, which will look like an elegant fix for §8.3 — fetch the file,
@@ -796,3 +802,7 @@ plumbing to feed it.
    likely fine; worth a closer look before designing for it. Not before M7.
 5. Rust edition and MSRV. §1 says 2021 / 1.75+, written before this dependency set;
    edition 2024 (Rust 1.85+) is likely the better default. Settle before `cargo new`.
+6. Does Yandex need ynison push-position, or does SMTC suffice? The answer picks
+   the crate — `yandex-music` for the resolver role, `yamuse` for a real push
+   `Source` — and it is a swap, not a flag. **Decide at M8**, once M4 has shown
+   whether SMTC's anchors hold up against Yandex Music desktop. See §6.4.

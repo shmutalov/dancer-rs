@@ -24,7 +24,7 @@ removes something the original spec assumed was necessary.
 | Functional segmentation | **Deferred to M8** | No trustworthy Rust option. `oximedia-mir` advertises it but its breadth-to-adoption ratio does not survive scrutiny. Derive boundaries from novelty + RMS instead |
 | Python `allin1` sidecar | **Optional, off the critical path** | Was the primary analysis path in spec §8.1. Now an M8 enrichment supplying segment labels only |
 | Yandex integration | **`yandex-music`** (vyfor) as an ID resolver | Mature: 0.7.0, ~15K downloads, maintained since June 2024. REST-only, so it cannot serve as a `Source` — see §5.8 |
-| Yandex realtime (`yamuse`) | **Rejected for now** | Has the ynison WebSocket that vyfor's lacks, but is 12 days old with 75 downloads. Revisit only if push-position proves necessary |
+| Yandex realtime (`yamuse`) | **Open — decide at M8** | Has the ynison WebSocket that vyfor's lacks. If ynison is needed, the crate changes; the two are not interchangeable behind a flag. See §5.8 and §6.6 |
 
 ### 1.1 What these decisions delete
 
@@ -322,6 +322,25 @@ learn-on-second-listen work at all.
 Failure degrades gracefully: lose the resolver and you fall back to hashed strings,
 not to nothing.
 
+**The crate choice is contingent, and deferred to M8.** `yandex-music` is correct
+*for the resolver role*. It cannot serve the other role. If Yandex ever needs to be
+a real push `Source` — continuous position over ynison rather than SMTC's
+event-driven timeline — then `yamuse` is the crate, and it is a swap, not a flag:
+different author, different API shape, different transport.
+
+Which means the decision belongs at implementation time, when we know whether
+SMTC's anchors are actually good enough for Yandex Music desktop. Until M4 has run
+against it, that is speculation. Two consequences for now:
+
+- Keep the resolver behind a narrow internal interface, so replacing or
+  supplementing it doesn't reach into `dancer-clock` or `dancer-choreo`.
+- Do not design the `Source` trait around REST polling assumptions. Spec §6.1
+  already takes `observed_at` per observation, which a push transport satisfies
+  naturally — keep it that way.
+
+By M8, `yamuse` will have either matured past its current 75 downloads or gone
+stale. Either outcome makes the decision easier than it is today.
+
 ### 5.9 A capability to fence off
 
 `yamuse` advertised lossless downloads, and other Yandex wrappers expose similar
@@ -349,3 +368,8 @@ Carried forward, with the resolved ones struck.
 4. Should scores be shareable — a small community repo of analysed track IDs? Worth
    a closer look, but not before M7.
 5. **New:** Rust edition and MSRV. See §0.3.
+6. **New:** Does Yandex need ynison push-position, or does SMTC suffice? **Decide at
+   M8, not before.** The answer picks the crate — `yandex-music` for the resolver
+   role as planned, `yamuse` if a real push `Source` is required — and the two are
+   a swap rather than a feature flag. Not answerable until M4 has run against
+   Yandex Music desktop and shown whether SMTC's anchors hold up. See §5.8.
