@@ -353,13 +353,25 @@ Subscribe to `MediaPropertiesChanged`, `PlaybackInfoChanged` and
 a background video doesn't hijack the dancer.
 
 **Caveats to handle:**
-- `Position` is only refreshed on state change, not continuously. Use
+- **`Position` is only refreshed on state change, not continuously.** Use
   `LastUpdatedTime` as the anchor timestamp, never `Instant::now()` at read time.
+  Measured 2026-08-15: Edge reported `0.019s` for a track 59.7 s in — stale by a
+  full minute on a two-minute track. This is not a rounding concern; without the
+  anchor, SMTC position data is unusable.
 - Some sessions publish no timeline at all. Detect and drop to `Unscored`; there is
   no audio fallback (§7).
+- **Some players publish nothing at all.** Measured 2026-08-15: Yandex Browser
+  returns zero sessions with Yandex Music actively playing, while Edge on the same
+  machine works. No OS cause — no policy, default flags. For such a player the
+  dancer never learns anything is playing and sits `Idle`, not `Unscored`. This is
+  what justifies the Yandex adapter (§6.4), and it needs a compatibility sweep
+  before M4 exits: Chrome, Firefox, Opera, Spotify desktop, AIMP, foobar2000, VLC.
 - **Track identity is `(title, artist)`, never a file path.** Normalise (trim,
   casefold, strip `- Remastered` style suffixes) and look the result up in the
-  `library` table (§5.1). That lookup is what connects "the user pressed play in
+  `library` table (§5.1). The first specimen measured was title
+  `"Blur - Song 2 (Official Music Video)"` with artist `"Blur"` — needing both
+  suffix stripping *and* removal of the artist duplicated into the title. That the
+  first track tested was already awkward suggests this is the common case. That lookup is what connects "the user pressed play in
   foobar2000" to "we analysed that file last week" — it is the mechanism the whole
   owned-music path rests on (§8.3), so the normalisation rules deserve real tests
   and a fixture set of awkward titles.
@@ -419,13 +431,15 @@ choosing. Keep it feature-flagged, keep SMTC covering the same player, and do no
 let a break take the binary down. `yandex-music` (vyfor, ~15K downloads, maintained
 since June 2024) stays the fallback for the resolver role.
 
-**Note the tension.** ynison's advantage is *precise position*, which only matters
-in `Locked`. Streamed tracks are permanently `Unscored` (§8.3) — no recording, no
-hosted grids, no downloads — and an `Unscored` dancer runs a fixed-fps loop where a
-tighter anchor changes nothing visible. On the current design this buys little,
-while adding a young dependency that ships the very download endpoints fenced off
-below. Revisit at M6, including the option of not building Yandex support beyond
-SMTC at all.
+**Why, as of 2026-08-15.** The original case was ynison's precise position, and it
+was weak: precision only matters in `Locked`, and streamed tracks are permanently
+`Unscored` (§8.3). Phase 0.5 replaced that argument with a better one — Yandex
+Browser publishes *nothing* to SMTC, so the choice is presence versus nothing, not
+fine position versus coarse. Without it the dancer cannot tell a track is playing.
+
+Still to settle at M6: whether the Yandex *desktop app* publishes to SMTC even
+though the browser does not. If it does, most users are served by the desktop app
+and `yamuse` narrows to covering the web player.
 
 **Do not reach the download endpoints.** Several Yandex wrappers expose lossless
 track downloads — fetch the file, analyse it, get a perfect grid.

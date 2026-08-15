@@ -29,7 +29,7 @@ removes something the original spec assumed was necessary.
 | Functional segmentation | **Deferred to M6** | No trustworthy Rust option. `oximedia-mir` advertises it but its breadth-to-adoption ratio does not survive scrutiny. Derive boundaries from novelty + RMS instead |
 | Python `allin1` sidecar | **Optional, off the critical path** | Was the primary analysis path in spec §8.1. Now an M6 enrichment supplying segment labels only |
 | Yandex integration | **`yandex-music`** (vyfor) as an ID resolver | Mature: 0.7.0, ~15K downloads, maintained since June 2024. REST-only, so it cannot serve as a `Source` — see §5.8 |
-| Yandex realtime (`yamuse`) | **Chosen 2026-08-15** | Replaces `yandex-music`: it has the ynison WebSocket, so Yandex becomes a push `Source` rather than an ID resolver. Two caveats — it is very young, and its value is now questionable given streaming is permanently `Unscored`. See §5.8 |
+| Yandex realtime (`yamuse`) | **Chosen 2026-08-15** | Replaces `yandex-music`. Justified not by ynison's precision but by Phase 0.5: Yandex Browser publishes nothing to SMTC, so without it the dancer cannot tell a track is playing at all. Still young — feature-flag it. See §5.8 |
 
 ### 1.1 What these decisions delete
 
@@ -181,23 +181,40 @@ still produces binaries that run on our Windows 10 build 19041 floor — what ma
 is which APIs are called, not which SDK is linked. The `windows` crate also carries
 its own WinRT metadata, so SMTC needs no SDK headers, only the import libraries.
 
-### 0.5 WinRT on GNU — **PARTIAL PASS 2026-08-15**
+### 0.5 SMTC on GNU — **PASS 2026-08-15**
 
-Harness: [spikes/smtc-probe](spikes/smtc-probe/). Written because §0.4 rules out
-MSVC and SMTC is the last unproven ABI surface — and it is the entire content of M4.
+Harness and full results: [spikes/smtc-probe](spikes/smtc-probe/README.md).
 
-`GlobalSystemMediaTransportControlsSessionManager::RequestAsync()` activates,
-`.join()` resolves the async operation, and `GetSessions()` enumerates. That is the
-COM/WinRT ABI working end to end on the GNU toolchain, which was the actual risk.
+Every call the source adapter needs works on the GNU toolchain: session
+enumeration, media properties, playback info, timeline, non-zero
+`LastUpdatedTime`. WinRT is not a problem here.
 
-API note for M4: the blocking accessor on `IAsyncOperation` is `join()`, not
-`get()`.
+API notes for M4: the blocking accessor on `IAsyncOperation` is `join()`, not
+`get()`; `PlaybackStatus` 4 = Playing.
 
-**Still untested:** reading properties off a *live* session — `TryGetMediaProperties`,
-`GetPlaybackInfo`, and above all `GetTimelineProperties().LastUpdatedTime`, which
-spec §6.2 requires as the clock anchor. Nothing was playing when the probe ran. The
-same ABI is already proven, so failure is unlikely, but "unlikely" is not "checked".
-Re-run with music playing to close it.
+Three findings outweigh the pass itself.
+
+**`Position` was stale by 59.6 seconds.** Edge reported `0.019s` for a track
+actually 59.7 s in — the value was captured at playback start and never refreshed.
+Spec §6.2 predicted this; the magnitude did not. Trusting `Position` with
+`Instant::now()` would have put the dancer a full minute out on a two-minute track.
+The `BeatClock` anchor design is not an optimisation — without it SMTC data is
+unusable. M1 should keep a fixture built from these exact numbers.
+
+**Yandex Browser does not publish to SMTC at all.** Zero sessions with Yandex Music
+actively playing, repeatedly; Edge on the same machine returns one immediately. No
+OS-level cause found — no policy keys, default browser flags, media features
+present. For a user on such a player the dancer never learns anything is playing:
+`Idle`, not `Unscored`. This changes the `yamuse` calculus (§5.8).
+
+**Titles need real normalisation, immediately.** The first track tested came back as
+title `"Blur - Song 2 (Official Music Video)"`, artist `"Blur"` — needing both
+suffix stripping and de-duplication of the artist out of the title. That the very
+first specimen is awkward suggests it is the common case, not an edge case.
+
+Follow-up before M4 exits: sweep which players actually publish — Chrome, Firefox,
+Opera, Spotify desktop, AIMP, foobar2000, VLC. That list determines how much of
+M4's value is real.
 
 ---
 
@@ -488,16 +505,29 @@ same player, and do not let a break take down the binary. `yandex-music` (vyfor,
 ~15K downloads, maintained since June 2024) remains the fallback for the resolver
 role if yamuse stalls.
 
-**Its main advantage may no longer buy anything.** ynison's value is *precise
-position*, and position precision only matters in `Locked`. Streamed tracks are
-permanently `Unscored` (§4.2): no recording, no hosted grids, no downloads. An
-`Unscored` dancer runs a fixed-fps loop, where a tighter anchor changes nothing
-visible.
+**Its justification changed on 2026-08-15 — for the better.** The original case was
+precise position via ynison, and that case was weak: position precision only matters
+in `Locked`, and streamed tracks are permanently `Unscored` (§4.2), where a tighter
+anchor changes nothing visible.
 
-So on the current design this is close to a no-op, bought at the cost of a young
-dependency that also ships the download endpoints §5.9 fences off. It is worth
-revisiting at M6 — either because something has changed, or to decide that Yandex
-integration beyond SMTC is not worth doing at all.
+Phase 0.5 then found that **Yandex Browser publishes nothing to SMTC** — zero
+sessions with Yandex Music actively playing, while Edge on the same machine works
+fine. So for that setup the choice is not "SMTC with coarse position" versus
+"ynison with fine position". It is **presence versus nothing**: without `yamuse`
+the dancer does not learn a track is playing at all and sits `Idle`.
+
+That is a much stronger argument than the one it replaces, and it was the user's
+instinct before the evidence existed.
+
+Two things still to carry into M6:
+
+- It remains young — keep it feature-flagged, and do not let a break take the
+  binary down.
+- It ships the download endpoints §5.9 fences off, so the structural guard matters.
+
+Open question for M6: whether the Yandex *desktop app* publishes to SMTC even
+though the browser does not. If it does, the cheap answer for most users is "use
+the desktop app", and `yamuse` narrows to covering the web player.
 
 ### 5.9 A capability to fence off
 

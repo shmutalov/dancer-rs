@@ -57,11 +57,30 @@ fn report(
             let pos = t.Position()?.Duration as f64 / 1e7;
             let end = t.EndTime()?.Duration as f64 / 1e7;
             let upd = t.LastUpdatedTime()?.UniversalTime;
-            println!("  position: {pos:.3}s / {end:.3}s");
-            println!(
-                "  anchor  : LastUpdatedTime = {upd} {}",
-                if upd == 0 { "<-- ZERO: unusable, no timeline" } else { "" }
-            );
+            println!("  position: {pos:.3}s / {end:.3}s  (as reported)");
+
+            if upd == 0 {
+                println!("  anchor  : ZERO — unusable, no timeline");
+            } else {
+                // FILETIME (100 ns ticks since 1601) -> seconds since UNIX epoch.
+                let anchor_unix = (upd - 116_444_736_000_000_000) as f64 / 1e7;
+                let now_unix = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs_f64();
+                let staleness = now_unix - anchor_unix;
+                println!("  anchor  : LastUpdatedTime is {staleness:.3}s old");
+                println!(
+                    "  EXTRAPOLATED position = {:.3}s   <- what the clock must use",
+                    pos + staleness
+                );
+                if staleness > 0.5 {
+                    println!(
+                        "            reported position is stale by {staleness:.1}s — \
+                         confirms spec §6.2: anchor on LastUpdatedTime, never Instant::now()"
+                    );
+                }
+            }
         }
         Err(e) => println!("  NO TIMELINE ({}) — would drop to Unscored", e.code().0),
     }
