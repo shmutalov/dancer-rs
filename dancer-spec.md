@@ -201,6 +201,7 @@ One JSON file per track, cached on disk, keyed by canonical track ID.
   "track_id": "spotify:4uLU6hMCjMI75M1A2tKUQC",
   "duration_ms": 214000,
   "bpm": 128.02,
+  "meter": 4,
   "source": "beat-this",
   "confidence": 0.91,
   "analyzed_at": "2026-08-12T10:04:00Z",
@@ -222,6 +223,12 @@ Field notes:
 
 - `source` is one of `"beat-this"` (§8.1, the default path), `"allin1"` (§8.2, with
   segment labels), or `"builtin"`.
+- `meter` is the modal bar length in beats. **Do not assume 4** — Phase 0.1 found
+  correct 3/4 detection on a waltz, and `beats_per_loop` (§4.2) is relative to it.
+- `downbeats` are detection *candidates*, not ground truth. Phase 0.1 found a track
+  with a rock-steady beat grid whose downbeats split 29 two-beat bars against 30
+  four-beat ones. Fit a regular bar phase to them and reject outliers before the
+  scheduler uses them — see §11.3.
 - `beats` / `beat_positions` / `downbeats` / `segments` keep `allin1`'s shape. Do
   not invent a different one; `beat-this` output maps onto it directly (beat
   numbers → `beat_positions`, number 1 → `downbeats`).
@@ -438,9 +445,16 @@ This is the whole metrical half of the analysis, in-process, on any Windows mach
 with no install story. What it does **not** provide is functional segmentation, so
 scores from this path carry `segments: []` — see §11.3 for how the scheduler copes.
 
-*Maturity caveat: 1.0.0 as of May 2026, ~491 downloads/month. The parity claims are
-the author's. Validate against known-BPM material before building on it; the
-fallback is `ort` with an ONNX export of the upstream weights.*
+**Model weights are not bundled** in the published crate: a ~270 KB mel front end
+plus either the ~10 MB small model or the ~83 MB full-accuracy one must ship with
+the app. There is still no install story for the *user* — no Python, no system
+libraries — but there is a packaging obligation.
+
+*Validated in Phase 0.1 (2026-08-15): builds clean on the GNU toolchain, 1.4–2.2%
+inter-beat deviation on steady material, 41–74x realtime, empty grid rather than a
+fabricated one on non-musical input. Caveats: four tracks, no independent
+annotations, small model. See `spikes/beat-this-probe`. Fallback if it degrades is
+`ort` with an ONNX export of the upstream weights.*
 
 ### 8.2 Optional sidecar for segment labels
 
@@ -641,7 +655,11 @@ Overrides, in priority order:
   (`loopable = false`) high-energy row, aligned so its impact lands on that downbeat.
 - Non-loopable rows return to `default_row` on completion.
 
-Change moves on downbeats only, never mid-bar, unless a cue forces it.
+Change moves on downbeats only, never mid-bar, unless a cue forces it — against the
+**fitted bar phase**, not raw `downbeats` entries. Beat detection is markedly more
+reliable than downbeat detection (§5), and this is the one place the scheduler
+depends on the weaker signal: a spurious downbeat means a move change half a bar
+early, which reads as the dancer stumbling.
 
 ---
 
@@ -772,7 +790,11 @@ plumbing to feed it.
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| `beat-this` quality below its claims | The whole grid path is suspect | Validate in Phase 0 against known-BPM material before building on it; fall back to `ort` + ONNX export of upstream weights |
+| ~~`beat-this` quality below its claims~~ | — | **Retired.** Phase 0.1 validated beat grids at 1.4–2.2% deviation, 41–74x realtime |
+| Downbeat detection unreliable | Moves change half a bar early; reads as stumbling | Fit bar phase to candidates and reject outliers (§11.3). Confirmed real in Phase 0.1 |
+| Meter assumed 4/4 | Waltzes and odd meters schedule wrong | `meter` field in the score (§5); `beats_per_loop` relative to it |
+| Model weights not bundled in the crate | ~10–83 MB to ship and version | Vendor with the installer; pin a checksum |
+| GNU toolchain vs MSVC | WinRT/WASAPI less travelled on GNU; `ort` fallback awkward | Unaffected through M3. Switch to `stable-msvc` before M4 |
 | No functional segmentation available | Pools can't key on section labels | Energy-tier selection (§11.3); labels are enrichment, not timing. Optional sidecar in M8 |
 | NATTEN build on Windows | Optional segment labels unavailable | No longer blocks the product (§8.2). Ship without labels |
 | winit gives colour-keying, not per-pixel alpha | Sprite edges look wrong | Settle in Phase 0; fall back to `UpdateLayeredWindow` before M0 rather than retrofitting |

@@ -67,18 +67,34 @@ work and none of it needs a device or a token.
 Two unknowns are load-bearing. Both are cheap to answer and both change the design
 if they fail. Answer them before writing production code.
 
-### 0.1 `beat-this` validation
+### 0.1 `beat-this` validation — **DONE 2026-08-15: pass, with one caveat**
 
-Run it over 8–10 local tracks with independently known BPM and downbeat positions
-— ideally a mix of steady electronic material and something with live tempo drift.
+Harness and full results: [spikes/beat-this-probe](spikes/beat-this-probe/README.md).
 
-- **Pass:** grids align with ground truth; downbeats land on bar ones.
-- **Fail:** fall back to `ort` with an ONNX export of the upstream PyTorch weights
-  before anything is built on top.
+Builds clean on `stable-x86_64-pc-windows-gnu`, edition 2024, 104 packages, 40 s,
+no system libraries. Beat grids run 1.4–2.2% inter-beat deviation on steady
+material — comfortably inside what the clock can track. Cost is 41–74x realtime, so
+analysis finishes far inside a track's own duration. Non-musical input returns an
+empty grid rather than a fabricated one. The tracker is stateless across calls, so
+one instance can be reused.
 
-Justification: the crate is 1.0.0 as of May 2026 with roughly 491 downloads/month.
-The parity claims are the author's and are not independently confirmed. It is now a
-dependency the whole project rests on.
+Three findings that change the design:
+
+1. **Meter is not always 4/4.** A waltz in the test set was correctly identified as
+   3/4 at 97% consistency. The score format must carry meter rather than assume
+   four — see spec §5.
+2. **Downbeats are weaker than beats.** One track had a rock-steady beat grid but
+   split 29 two-beat bars against 30 four-beat ones — spurious downbeats halving
+   bars. Since §11.3 changes moves on downbeats only, the scheduler must fit bar
+   phase to the downbeat *candidates* rather than trust each one. Added to M3.
+3. **Model weights are not bundled** in the published crate. ~270 KB mel front end
+   plus ~10 MB small model (or ~83 MB full) must ship with the app. Added to M7.
+
+Remaining caveats: four tracks, no independent annotations, small model rather than
+the full-accuracy one. This establishes plausibility and stability, not accuracy
+against ground truth. Widen the corpus if M3 shows scheduling problems that trace
+back to the grid. The upstream port is also AI-assisted per its own README, with CI
+and claimed parity tests — the reason this spike existed.
 
 ### 0.2 winit per-pixel alpha
 
@@ -89,11 +105,31 @@ not colour-keying (spec §12 flags this as unverified).
 - **Fail:** commit to `UpdateLayeredWindow` via the `windows` crate now, rather than
   retrofitting it after M0 has been built against the wrong assumption.
 
-### 0.3 Housekeeping
+### 0.3 Housekeeping — **DONE 2026-08-15**
 
-Decide Rust edition. Spec §1 says 2021 / MSRV 1.75+, written before the current
-dependency set. Several crates in this stack are recent; edition 2024 (Rust 1.85+)
-is likely the better default. Low stakes, but settle it before `cargo new`.
+Rust edition: **2024**. Local toolchain is 1.95.0, well past the 1.85 floor, and
+0.1 built and ran the full dependency tree on it. Spec §1's 2021 / 1.75+ predates
+this dependency set.
+
+### 0.4 Toolchain ABI — **OPEN, decide before M4**
+
+Surfaced by 0.1: the local toolchain is `stable-x86_64-pc-windows-gnu`, and no
+Visual Studio C++ toolset is installed (`vswhere` finds no product with
+`VC.Tools.x86.x64`).
+
+This did not matter for 0.1 — the analyzer path is pure Rust and built clean. It
+may matter later, because MSVC is the primary target for Windows-native work:
+
+- **M0–M3** are unaffected. `winit`, `softbuffer`, `image`, `beat-this` are all
+  fine on GNU.
+- **M4+** is the risk. The `windows` crate supports both ABIs, but WinRT (SMTC) and
+  WASAPI are better travelled on MSVC.
+- **The `ort` fallback** from 0.1 would be awkward on GNU: prebuilt
+  `libonnxruntime` binaries are MSVC-built. Only relevant if we ever leave `rten`.
+
+Switching is `rustup toolchain install stable-msvc` plus a VS Build Tools install
+(several GB). Cheap to do now, annoying to discover at M4 after building on the
+wrong ABI. Recommend switching before M4 rather than at it.
 
 ---
 
@@ -162,9 +198,17 @@ bugs. Keep these fixtures permanently as regression tests.
 **Crates:** `dancer-analyze`, `dancer-score` (cache store)
 
 - Wire `beat-this`: `load_audio()` → `analyze_audio()` → `BeatAnalysis`.
-- Map its output onto the score format: timestamps → `beats`, beat numbers →
-  `beat_positions`, number 1 → `downbeats`. `calculate_bpm()` → `bpm`.
+- Map its output onto the score format: `BeatAnalysis::beats` → `beats`,
+  `beat_counts()` → `beat_positions`, `downbeats` → `downbeats`,
+  `calculate_bpm()` → `bpm`.
+- **Carry meter.** Phase 0.1 found correct 3/4 detection on a waltz; do not assume
+  four. Infer modal bar length from `beat_counts()` and store it.
+- **Fit bar phase rather than trusting each downbeat.** Phase 0.1 found spurious
+  downbeats halving bars on an otherwise clean grid. With a stable inter-beat
+  interval, fit a regular bar grid to the candidates and reject outliers.
 - Derive `energy` from RMS over the beat grid.
+- Ship the ONNX weights: ~270 KB mel + ~10 MB small model. Not bundled in the
+  crate. Decide small vs full (~83 MB) on measured quality, not by default.
 - Emit `source: "beat-this"`, with a confidence heuristic.
 - Cache to `%LOCALAPPDATA%\dancer-rs\scores\{source}\{track_id}.json`, namespaced
   per source (spec §5.1).
@@ -188,7 +232,12 @@ The milestone the project exists for.
 - `start_time = target_beat − (impact_cell × frame_duration) − render_latency`.
 - **Measure `render_latency`**; do not assume 16 ms.
 - Move selection per §11.3, with the fallback path below.
-- Change moves on downbeats only, unless a cue forces otherwise.
+- Change moves on downbeats only, unless a cue forces otherwise — but against the
+  **fitted** bar phase from M2, not raw downbeat detections. Phase 0.1 showed raw
+  downbeats are the least reliable part of the analysis, and this is the one place
+  the scheduler depends on them.
+- Respect meter: `beats_per_loop` is relative to the score's bar length, not a
+  hardcoded four.
 - Non-loopable rows return to `default_row`.
 
 **Segment-label fallback.** Spec §11.3 filters rows by `pools` containing the
