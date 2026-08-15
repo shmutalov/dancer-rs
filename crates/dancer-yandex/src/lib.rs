@@ -50,7 +50,9 @@ use yamuse::models::search::Search;
 use yamuse::models::track::Track;
 use yamuse::{SearchQuery, SearchType};
 
+pub mod auth;
 pub mod match_track;
+pub use auth::{login, DeviceLogin};
 pub use match_track::{score_candidate, Candidate};
 
 /// Namespace for scores that came from here (spec §5.1).

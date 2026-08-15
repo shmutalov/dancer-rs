@@ -77,6 +77,22 @@ fn main() -> anyhow::Result<()> {
 
     let cfg = Config::load(&dir);
 
+    // Round-trips the loaded config, so a file written by an older build gains
+    // whatever keys have since appeared without losing what is already set.
+    // `#[serde(default)]` means a missing section works fine at runtime, but it
+    // also means the user cannot discover a setting by reading the file.
+    if args.yandex_login {
+        return run_yandex_login(cfg, &dir);
+    }
+
+    if args.write_config {
+        cfg.save(&dir)?;
+        let path = dir.join("config.toml");
+        println!("Wrote {}", path.display());
+        println!("\nFor Yandex, set:\n  [source.yandex]\n  token = \"...\"\n  fetch_for_analysis = true");
+        return Ok(());
+    }
+
     // A command, not a mode: analyse and exit. Deliberately separate from the
     // dancer, because a library scan is minutes of work and should not be
     // happening invisibly behind a sprite.
@@ -215,6 +231,68 @@ fn main() -> anyhow::Result<()> {
     };
     event_loop.run_app(&mut app)?;
     Ok(())
+}
+
+/// `--yandex-login`: OAuth device flow, then store the token (spec §6.4.1).
+///
+/// Deliberately a separate command that exits. Signing in is a decision, and it
+/// should not be something that happens because the dancer was launched.
+#[cfg(feature = "yandex")]
+fn run_yandex_login(mut cfg: Config, dir: &Path) -> anyhow::Result<()> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+
+    let device = hostname().unwrap_or_else(|| "dancer-rs".into());
+    println!("Signing in to Yandex Music as \"{device}\"…\n");
+
+    let token = runtime.block_on(dancer_yandex::login(&device, |code| {
+        // Printed from inside the callback because the call blocks afterwards,
+        // waiting for confirmation — printing after it returns would show the
+        // code once it was already too late to use.
+        println!("  1. Open {}", code.verification_url);
+        println!("  2. Enter code: {}", code.user_code);
+        if let Some(t) = code.expires_in {
+            println!("     (valid for {} minutes)", t.as_secs() / 60);
+        }
+        println!("\nWaiting for confirmation…");
+    }));
+
+    match token {
+        Ok(token) => {
+            cfg.source.yandex.token = token;
+            // Signing in *is* the request, so there is nothing left to opt into.
+            cfg.source.yandex.fetch_for_analysis = true;
+            cfg.save(dir)?;
+            println!("\nSigned in. Token saved to {}", dir.join("config.toml").display());
+            println!(
+                "Streamed tracks will now be fetched, analysed and deleted.\n\
+                 Revoke any time at https://id.yandex.ru/security/app-passwords, \
+                 or set fetch_for_analysis = false."
+            );
+            Ok(())
+        }
+        Err(e) => {
+            // Not an anyhow bail: a declined or expired sign-in is a normal
+            // outcome, not a crash, and the message is already the whole story.
+            println!("\nSign-in did not complete: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+#[cfg(not(feature = "yandex"))]
+fn run_yandex_login(_cfg: Config, _dir: &Path) -> anyhow::Result<()> {
+    anyhow::bail!("this build has the `yandex` feature disabled")
+}
+
+/// A name the user will recognise in their Yandex device list.
+#[cfg(feature = "yandex")]
+fn hostname() -> Option<String> {
+    std::env::var("COMPUTERNAME")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| format!("dancer-rs on {s}"))
 }
 
 /// Whether to fetch a streamed track in order to analyse it (spec §6.4).

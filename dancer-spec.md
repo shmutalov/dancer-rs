@@ -558,8 +558,18 @@ redistributed. That is a defensible line, and it is theirs to draw.
    track*. There is deliberately no batch mode, and adding one would change what
    this is.
 5. **Off unless asked for.** Requires the `yandex` feature, an OAuth token, and
-   `fetch_for_analysis = true`. Supplying a credential is the unambiguous act of
-   asking; a default could never be.
+   `fetch_for_analysis = true`. Signing in is the unambiguous act of asking; a
+   default could never be.
+
+   **The token comes from the OAuth device flow, not from the user.** The first
+   implementation expected a token pasted into `config.toml`, which meant telling
+   people to dig a credential out of the desktop client's storage or a browser
+   session. That is a bad instruction three times over: fiddly, it teaches users to
+   go hunting through application internals for credentials, and the result is
+   indistinguishable from what a credential stealer would ask for. `--yandex-login`
+   shows a short code, the user enters it on a Yandex page in their own browser, and
+   Yandex issues the token. They authenticate with Yandex, never with us, and can
+   revoke it from their account page.
 6. **A match must be confirmable.** Duration is required evidence, not a weighted
    term: a perfect title and artist with no duration to check scores below the
    threshold and does not trigger a fetch. Being wrong here means having retrieved

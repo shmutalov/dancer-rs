@@ -32,6 +32,11 @@ pub struct Args {
     pub no_smtc: bool,
     /// Never fetch a streamed track, whatever the config says.
     pub no_fetch: bool,
+    /// Write a complete config file, filling in every key with its current or
+    /// default value, then exit. Existing settings are preserved.
+    pub write_config: bool,
+    /// Sign in to Yandex via the OAuth device flow, store the token, then exit.
+    pub yandex_login: bool,
     /// Folders to analyse into the cache, then exit.
     ///
     /// The SMTC source can only recognise tracks the library already knows, so
@@ -61,6 +66,8 @@ your music first:
   --no-anticipate       Start without anticipation (middle-click toggles it)
   --no-smtc             Do not follow the system media session
   --no-fetch            Never fetch a streamed track for analysis
+  --write-config        Write a complete config.toml and exit
+  --yandex-login        Sign in to Yandex Music, store the token, and exit
   --rate <F>            Simulated transport speed, 1.0 nominal
   --stale <SECS>        Report positions this many seconds old
   -h, --help            This text
@@ -84,6 +91,8 @@ pub fn parse<I: Iterator<Item = String>>(args: I) -> Result<Args, String> {
             "--no-smtc" => out.no_smtc = true,
             "--scan" => out.scan.push(PathBuf::from(value("--scan")?)),
             "--no-fetch" => out.no_fetch = true,
+            "--write-config" => out.write_config = true,
+            "--yandex-login" => out.yandex_login = true,
             "--rate" => {
                 let v = value("--rate")?;
                 out.rate = Some(v.parse().map_err(|_| format!("--rate: {v} is not a number"))?);
