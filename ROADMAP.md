@@ -17,6 +17,7 @@ removes something the original spec assumed was necessary.
 | Concern | Decision | Rationale |
 |---|---|---|
 | Primary language | **Rust, end to end** | Every layer has a first-class crate; Python survives only as an optional extra |
+| Windows 10 | **First-class, not degraded** | Large share of the install base. No feature may require a Win11-only API. The binding constraint is per-process audio capture (build 20348+), which no retail Win10 build has — so full-mix capture is the shipping path and per-process is an enhancement |
 | Beat + downbeat tracking | **`beat-this`** (rten backend) | Rust port of the ISMIR 2024 tracker; reports verified F-measure parity with the PyTorch reference. Emits beats, downbeats and beat numbers — maps 1:1 onto the score format |
 | ML runtime | **`rten`**, with `ort` as cross-check | Ships inside `beat-this`. Do not add a second framework |
 | GGUF / `candle` | **Rejected** | GGUF is a ggml container for quantized LLMs; no MIR model is published in it. `candle` is capable but redundant when `rten` is already in the tree |
@@ -298,17 +299,28 @@ with no mid-move cuts on pause.
 
 **Crate:** `dancer-audio`
 
-- `wasapi` crate; verify per-process support against the current version.
-- Prefer per-process capture: `ActivateAudioInterfaceAsync` with
+- `wasapi` crate; verify loopback support against the current version.
+- **Build full-mix first and treat it as the shipping path.** Per-process capture
+  needs build 20348+, which no retail Windows 10 has (19045 is the last), so it is
+  a Windows 11 enhancement — detect and use it opportunistically, never require it.
+  Since the dev machine is 19044, full-mix is what gets exercised by default, which
+  is the right way round.
+- Per-process, when available: `ActivateAudioInterfaceAsync` with
   `PROCESS_LOOPBACK` + `PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE`,
-  resolving the PID from the SMTC session. Fall back to full-mix.
+  resolving the PID from the SMTC session.
 - 44.1 kHz mono f32; 1024-sample window, 512 hop; `realfft` spectral flux.
+- **Bandpass to the low band before onset detection.** On a full mix this is what
+  separates kick drums from notification chimes.
 - Silence watchdog: RMS below floor for >300 ms while nominally playing → freeze.
+  Corroborate with SMTC playback state — on a contaminated mix the failure mode is
+  false *non*-silence, so the watchdog cannot be the sole authority.
 - Offset calibration: cross-correlate live onsets against the score's beat grid,
-  store per `SourceAppUserModelId`. Expose a manual nudge.
+  store per `SourceAppUserModelId`. Discard runs with a weak correlation peak
+  rather than storing a bad offset. Expose a manual nudge.
 
-**Exit:** per-process capture works, watchdog fires correctly, calibration produces
-a stable repeatable value.
+**Exit:** full-mix capture works on Windows 10 with the watchdog firing correctly
+and calibration producing a stable repeatable value. Per-process validated
+separately on a Windows 11 box, as an enhancement rather than a gate.
 
 ---
 
@@ -325,6 +337,13 @@ is user-enabled.
 - On clean completion: analyse, cache under the track ID, delete the WAV.
 
 **Exit:** an unknown streamed track is reactive on play 1 and locked on play 2.
+
+**Windows 10 makes this harder.** Without per-process capture (§M5), the recording
+is the full system mix, so a Discord ping or a notification lands in the WAV and can
+corrupt the derived grid — and §8.3's own principle is that a confidently wrong grid
+is worse than none. Lean on the `confidence` gate to reject those results rather
+than trusting them, and treat a rejected recording as "try again next play", which
+costs the user nothing since the feature is already best-effort.
 
 **Note:** this milestone's uncertainty is not technical. Local files are the honest
 path; treat streaming lock as a bonus. It is also the point at which the `Reactive`

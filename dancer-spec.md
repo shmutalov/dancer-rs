@@ -2,7 +2,10 @@
 
 **Working title:** `dancer-rs` (placeholder)
 **Target language:** Rust (2021 edition, MSRV 1.75+)
-**Primary platform:** Windows 10 2004+ / Windows 11
+**Primary platform:** Windows 10 2004+ (build 19041) and Windows 11, both
+first-class. Windows 10 is still a large share of the install base, so no feature
+may *require* a Windows 11-only API — see §7.1, where per-process audio capture is
+unavailable on every retail Windows 10 build and must degrade rather than gate.
 **Status:** Draft v2 — stack decided, design frozen enough to start Phase 0
 **Plan:** see [ROADMAP.md](ROADMAP.md)
 
@@ -398,17 +401,36 @@ Use the `wasapi` crate (explicit loopback support) rather than `cpal`, whose
 loopback story on Windows is less direct. Verify against the current version of
 both before committing.
 
-Default device loopback captures the full system mix — including Discord, browser
-notifications and Windows sounds, all of which corrupt onset detection.
+**Full-mix loopback is the primary path.** Default device loopback captures the
+whole system mix — including Discord, browser notifications and Windows sounds,
+all of which contaminate onset detection. That is a condition to design for, not
+an edge case, because the alternative is unavailable to most of the user base.
 
-**Prefer per-process loopback.** Windows 10 build 20348+ supports capturing a
-single process tree via `ActivateAudioInterfaceAsync` with
+Per-process loopback — `ActivateAudioInterfaceAsync` with
 `AUDIOCLIENT_ACTIVATION_PARAMS` set to `PROCESS_LOOPBACK` and
-`PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE`, targeting the PID of
-`Spotify.exe` or the browser. This is exactly the "Windows Sound Mixer" per-app
-routing the volume mixer shows, exposed programmatically. Resolve the PID from the
-SMTC session's `SourceAppUserModelId`. Fall back to full-mix loopback when the API
-is unavailable or the process can't be resolved.
+`PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE`, targeting the PID resolved
+from the SMTC session's `SourceAppUserModelId` — requires **build 20348+**. That is
+Windows Server 2022's build number. Retail Windows 10 ends at 19045 (22H2), so
+**no consumer Windows 10 build has this API**; it is effectively Windows 11 and up.
+Since Windows 10 is a first-class target (§1), treat per-process capture as an
+opportunistic enhancement: detect it, use it when present, and never require it.
+
+**Designing for a contaminated mix.** Capture is not the sync mechanism (see above),
+so contamination degrades secondary features rather than the core, and beat grids
+come from offline analysis regardless. Per purpose:
+
+- *Silence watchdog.* Contamination causes false **non**-silence — a notification
+  while the music is paused means the watchdog fails to fire, so the dancer keeps
+  moving to silence. Cross-check against SMTC playback state and treat the watchdog
+  as corroboration, never as the authority.
+- *Offset calibration.* Cross-correlation over a 4 s window is dominated by the
+  music. Advise a quiet system during calibration and discard runs with a weak
+  correlation peak rather than storing a bad offset.
+- *Recording for analysis (§8.3).* The real casualty. A notification mid-track can
+  corrupt the derived grid, and a confidently wrong grid is worse than none — so
+  lean on the `confidence` gate to reject the result rather than trusting it.
+- *Reactive fallback.* Bandpass to the low band before onset detection. Kick drums
+  live there; notification chimes and Discord alerts mostly do not.
 
 ### 7.2 Buffer and DSP
 
@@ -807,12 +829,11 @@ plumbing to feed it.
 | No functional segmentation available | Pools can't key on section labels | Energy-tier selection (§11.3); labels are enrichment, not timing. Optional sidecar in M8 |
 | NATTEN build on Windows | Optional segment labels unavailable | No longer blocks the product (§8.2). Ship without labels |
 | ~~winit gives colour-keying, not per-pixel alpha~~ | — | **Retired.** Phase 0.2 measured the `UpdateLayeredWindow` path exact to ±1 across an alpha ramp. `softbuffer` dropped: it has no alpha channel |
-| Per-process loopback needs build 20348+ | Preferred capture path untestable locally | Dev machine is Windows 10 build 19044, below the floor. Full-mix fallback must work and be tested; validate per-process on a Win11 box before M5 exits |
 | Yandex internal API changes | ID resolution breaks | Feature flag; SMTC still supplies position and identity, degraded to hashed strings |
 | Recording legality / ToS | Feature must ship disabled | Off by default, explicit opt-in, local-only, WAV deleted after analysis |
 | Track download endpoints used for analysis | Substantially worse ToS exposure than §7.3 | Keep `dancer-source` structurally unable to reach them (§6.4) |
 | SMTC session ambiguity | Wrong app drives the dancer | Allowlist + explicit source selection in tray |
-| Per-process loopback unsupported | Noisy capture | Full-mix fallback; onset detection on a bandpassed low band is fairly robust |
+| Per-process loopback needs build 20348+ | Unavailable on **every** retail Windows 10 build (19045 is the last), so a large share of users get a contaminated mix | Full-mix is the primary path, not the fallback (§7.1). Bandpass the low band for onsets; corroborate the watchdog with SMTC state; let `confidence` reject corrupted recordings. Dev machine is 19044, so the Win10 path is what gets tested by default — validate per-process on a Win11 box before M5 exits |
 | Sheets lack `impact_cell` | No anticipation, back to FAOSDance behaviour | Ship an annotated default sheet; add a small cell-picker tool in M7 |
 
 ---
