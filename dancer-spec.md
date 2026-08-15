@@ -83,7 +83,7 @@ dancer-rs/
 ├── crates/
 │   ├── dancer-sprite/      Sheet loading, manifest parsing, frame indexing
 │   ├── dancer-render/      winit window, compositing, Win32 window styles
-│   ├── dancer-score/       Score types, JSON (de)serialisation, cache store
+│   ├── dancer-score/       Score types, redb cache store, library index
 │   ├── dancer-clock/       BeatClock, drift correction, phase estimation
 │   ├── dancer-choreo/      Move selection, anticipation scheduling
 │   ├── dancer-source/      `Source` trait + adapters (smtc, spotify, yandex, file)
@@ -192,7 +192,8 @@ about the anticipation behaviour derives from it.
 
 ## 5. Score format
 
-One JSON file per track, cached on disk, keyed by canonical track ID.
+Serialised into a single-file `redb` store (§5.1), keyed by canonical track ID.
+Shown here as JSON for readability.
 
 ```json
 {
@@ -243,12 +244,36 @@ Field notes:
 
 ### 5.1 Cache
 
-```
-%LOCALAPPDATA%\dancer-rs\scores\{source}\{track_id}.json
-```
+**One file, `scores.db`, using `redb`.** Not a JSON file per track: a user with a
+few hundred analysed tracks should not get a few hundred files scattered under a
+directory they will never find. Everything the app owns lives in one folder beside
+the executable (§13).
 
-Track IDs are namespaced per source. The same song from Spotify and from Yandex
-gets two entries — masters differ, and a beat grid off by 40 ms looks broken.
+`redb` is pure Rust and single-file. The workload is point lookup on track start
+and insert after analysis, so a key-value store is the right shape and SQL would
+buy nothing — and `rusqlite` would reintroduce a C compiler to a build that
+currently has none, which is the same property §8.1 was chosen to protect.
+
+Two tables:
+
+| Table | Key | Value |
+|---|---|---|
+| `scores` | `{source}:{track_id}` | Score, serialised |
+| `library` | normalised `(title, artist)` | file path + score key |
+
+Track IDs are namespaced per source. The same song from Spotify and from a local
+file gets two entries — masters differ, and a beat grid off by 40 ms looks broken.
+
+`library` exists because SMTC reports `(title, artist)`, never a path (§6.2). It is
+what lets an analysed local file be recognised when the user plays it through their
+own player. See §8.3.
+
+Because it is a single file, copying it elsewhere works. That is a property, not a
+feature: we neither build nor support sharing (§17.4).
+
+**Trade-off accepted:** a `redb` file is opaque where a SQLite file opens in any
+free browser. Ship a `dancer-rs dump` subcommand so a suspect grid can still be
+inspected.
 
 ---
 
@@ -303,9 +328,14 @@ a background video doesn't hijack the dancer.
 **Caveats to handle:**
 - `Position` is only refreshed on state change, not continuously. Use
   `LastUpdatedTime` as the anchor timestamp, never `Instant::now()` at read time.
-- Some sessions publish no timeline at all. Detect and fall back to audio-only.
-- Track identity is `(title, artist)`, not a stable ID. Normalise (trim, casefold,
-  strip `- Remastered` style suffixes) and hash for the cache key.
+- Some sessions publish no timeline at all. Detect and drop to `Unscored`; there is
+  no audio fallback (§7).
+- **Track identity is `(title, artist)`, never a file path.** Normalise (trim,
+  casefold, strip `- Remastered` style suffixes) and look the result up in the
+  `library` table (§5.1). That lookup is what connects "the user pressed play in
+  foobar2000" to "we analysed that file last week" — it is the mechanism the whole
+  owned-music path rests on (§8.3), so the normalisation rules deserve real tests
+  and a fixture set of awkward titles.
 
 ### 6.3 Spotify adapter (optional, better IDs)
 
@@ -374,8 +404,8 @@ upgrade the stronger one: recording was local capture of audio already playing o
 the user's machine, disabled by default; this is retrieving masters from a CDN.
 
 Keep `dancer-source` structurally unable to call them, rather than relying on
-nobody reaching. The sanctioned answer to the same problem is §17.4 — grids, not
-audio.
+nobody reaching. There is no sanctioned alternative for streamed tracks: they stay
+`Unscored` (§8.3). That is the decision, not a gap awaiting a workaround.
 
 ### 6.5 Local file adapter (development)
 
@@ -412,13 +442,15 @@ best case was "sometimes less wrong".
 **What this costs.** Without recording there is no learn-on-second-listen, so
 streamed unknown tracks get no grid — not degraded, absent. The app is excellent
 for local files; for Spotify and Yandex it knows identity and position but has
-nothing to dance to. See §17.4 for the intended answer.
+nothing to dance to. Settled at §17.4: there is no hosted-score answer, and the
+product is owned music via the library index (§8.3).
 
 **What it buys.** One crate, two milestones, the `wasapi` dependency, the recording
 legal exposure, and the whole contaminated-mix design problem — all deleted.
 
-Revisit post-v1 if the shared-score path (§17.4) fails to materialise and streaming
-support turns out to matter more than the cost.
+Revisit post-v1 only if streaming support turns out to matter more than everything
+above — and note that recording was never a good answer to it, merely the available
+one.
 
 ---
 
@@ -479,21 +511,29 @@ adoption does not survive scrutiny; benchmark before trusting it.
 
 ### 8.3 Where scores come from
 
-Analysis needs a file it can read. That gives two paths, and deliberately not a
-third:
+**Analysis needs a file it can read.** Everything follows from that.
 
-1. **Local files.** The file adapter (§6.5) hands `dancer-analyze` a real path.
-   Analyse once, cache under the track ID (§5.1), locked from the first beat on
-   every later play. This is the primary path and it works offline.
-2. **Streamed tracks.** No readable file, and with the audio subsystem cut (§7) no
-   recording either — so no local route to a grid. The intended answer is a shared
-   score cache: fetch a grid by track ID that someone else has already computed.
-   See §17.4; unresolved, and streaming is idle-only until it is.
+1. **Files in the user's library.** Scan the configured folders (§13), analyse,
+   cache the grid *and* an index entry keyed by normalised `(title, artist)`
+   (§5.1). This is the primary path, it works entirely offline, and it is what
+   makes (2) work.
+2. **The user's own player.** SMTC reports title, artist and position for whatever
+   is playing — foobar2000, AIMP, VLC, Winamp — but never a file path (§6.2). Match
+   its `(title, artist)` against the `library` table and the grid is already there.
+   The user plays their music however they normally do and the dancer locks on.
+3. **Streamed tracks.** No readable file, and with the audio subsystem cut (§7) no
+   recording either. There is no route to a grid, and by decision there will not
+   be one (§17.4). Spotify and Yandex drive identity, position and pause/resume,
+   and the dancer runs `Unscored` — a fixed-fps loop, honest about knowing nothing.
 
-Learn-on-second-listen — capture the loopback, analyse the WAV, cache the result —
-was the previous answer to (2). It is cut with the rest of §7. It was opt-in,
-disabled by default, prohibited by streaming ToS, and on a full mix it produced
-corrupt grids, which the `confidence` gate would mostly have rejected anyway.
+Path (2) is the point. Owned music is how most people listen to the music they care
+about most, and it needs no account, no service and no network. Streaming being
+unscored is a real limitation, not a temporary one — state it plainly in the UI
+rather than letting users think it is broken.
+
+Learn-on-second-listen — capture the loopback, analyse the WAV — was the previous
+answer to (3) and is cut with the rest of §7: opt-in, disabled by default,
+prohibited by streaming ToS, and corrupt on a contaminated mix.
 
 ---
 
@@ -705,7 +745,28 @@ early, which reads as the dancer stumbling.
 
 ## 13. Configuration
 
-`%APPDATA%\dancer-rs\config.toml`, hot-reloaded via `notify`.
+**Portable layout.** Everything the app owns sits in one folder beside the
+executable:
+
+```
+dancer-rs/
+├── dancer-rs.exe
+├── config.toml        hand-editable; hot-reloaded via `notify`
+├── scores.db          single-file cache — grids + library index (§5.1)
+├── models/            beat-this ONNX weights (§8.1) — must ship anyway
+└── artwork/           sprite sheets
+```
+
+Fall back to `%LOCALAPPDATA%\dancer-rs\` only when the executable's directory is
+not writable — installed under Program Files, or run from read-only media. Detect
+by attempting a write, not by inspecting the path.
+
+The earlier draft split config across `%APPDATA%` and the cache across
+`%LOCALAPPDATA%`, one JSON per track. A user could not answer "where does this
+thing keep its stuff" without being told. Now they open one folder and see it.
+
+Config stays TOML because it is meant to be hand-edited; the cache is a database
+because it is not.
 
 ```toml
 [sprite]
@@ -732,8 +793,16 @@ poll_interval_ms = 3000
 "Spotify.exe" = 180
 "chrome.exe"  = 250
 
+# Folders scanned and analysed so SMTC-reported tracks can be matched to a
+# file we already have a grid for. See §8.3.
+[library]
+folders = ["C:\\Users\\me\\Music"]
+watch = true                       # re-scan on change via `notify`
+analyze_on_scan = false            # true = analyse everything up front
+
 [analysis]
 model_dir = "models"               # beat-this ONNX weights; see §8.1
+cache = "scores.db"                # single-file redb store; see §5.1
 sidecar_path = "sidecar/dancer-analyze.exe"    # optional, M6
 min_confidence = 0.6
 
@@ -791,6 +860,7 @@ plumbing to feed it.
 | `rspotify` | Spotify Web API + OAuth PKCE (M6) |
 | `yandex-music` | Yandex track ID resolution (M6, §6.4) |
 | `serde` / `serde_json` / `toml` | Score, manifest, config |
+| `redb` | Single-file score cache and library index (§5.1) |
 | `crossbeam-channel` | Thread messaging |
 | `notify` | Config and artwork hot reload |
 | `tray-icon` | System tray |
@@ -814,8 +884,8 @@ plumbing to feed it.
 | ~~winit gives colour-keying, not per-pixel alpha~~ | — | **Retired.** Phase 0.2 measured the `UpdateLayeredWindow` path exact to ±1 across an alpha ramp. `softbuffer` dropped: it has no alpha channel |
 | Yandex internal API changes | ID resolution breaks | Feature flag; SMTC still supplies position and identity, degraded to hashed strings |
 | ~~Recording legality / ToS~~ | — | **Retired.** Audio capture cut from v1 (§7); nothing records anything |
-| Streamed tracks have no grid path | Spotify/Yandex are idle-only in v1 | Accepted cost of cutting §7. The shared score cache (§17.4) is the intended answer and is unresolved |
-| Track download endpoints used for analysis | Retrieving masters from a CDN. **More tempting since §7 was cut** — it is now the obvious-looking way to give streaming a grid | Keep `dancer-source` structurally unable to reach them (§6.4). The sanctioned answer is §17.4 |
+| Streamed tracks have no grid path | Spotify/Yandex are permanently `Unscored` | Settled, not deferred: no hosted cache (§17.4). Owned music via the library index is the product (§8.3). Say so in the UI so it does not read as a bug |
+| Track download endpoints used for analysis | Retrieving masters from a CDN. **The most tempting shortcut in the project** — with recording cut and no hosted cache, it is the only remaining way to give streaming a grid | Keep `dancer-source` structurally unable to reach them (§6.4). There is no sanctioned alternative: streaming stays `Unscored` |
 | SMTC session ambiguity | Wrong app drives the dancer | Allowlist + explicit source selection in tray |
 | ~~Per-process loopback needs build 20348+~~ | — | **Retired.** This constraint is what removed the audio subsystem rather than something to mitigate (§7) |
 | Sheets lack `impact_cell` | No anticipation, back to FAOSDance behaviour | Ship an annotated default sheet; add a small cell-picker tool in M5 |
@@ -833,19 +903,17 @@ plumbing to feed it.
    the manifest allow arbitrary widths with 8 as the default? **Keep it**, with the
    manifest free to override later. Costs nothing and buys the whole existing
    sheet library.
-4. **Promoted — this is now the only path to streaming support. Investigate at M5.**
-   Should scores be shareable: a fetchable cache of analysed track IDs, so a grid
-   computed once by anyone serves everyone? A score is timing metadata — beat times,
-   downbeats, bpm, meter, roughly 20 KB of numbers — and contains **no audio**,
-   which is what makes this plausible where recording (§7) was not. Closer to a BPM
-   database or a chord chart than to a copy of the song.
+4. ~~Should scores be shareable via a hosted cache?~~ **Resolved: no.** Everything
+   is analysed and cached locally (§5.1). We will not run a server, host grids, or
+   build fetch/upload paths.
 
-   With learn-on-second-listen cut (§8.3), Spotify and Yandex are idle-only until
-   this exists. Two questions gate any design work: whether distributing derived
-   timing data is actually clear, and who hosts and curates it.
+   `scores.db` is a single file, so a user who copies it to a friend will find that
+   it works. That is a consequence of the storage choice, not a supported feature —
+   nothing in the app assists it and nothing depends on it.
 
-   Deliberately scheduled *after* the local-file product works, so we learn whether
-   streaming is wanted before committing to run infrastructure for it.
+   The cost is settled rather than deferred: streamed tracks have no route to a
+   grid and will not get one (§8.3). Owned music via the library index is the
+   product; streaming is `Unscored`.
 5. Rust edition and MSRV. §1 says 2021 / 1.75+, written before this dependency set;
    edition 2024 (Rust 1.85+) is likely the better default. Settle before `cargo new`.
 6. Does Yandex need ynison push-position, or does SMTC suffice? The answer picks
