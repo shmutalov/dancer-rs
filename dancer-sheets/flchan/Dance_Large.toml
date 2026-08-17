@@ -1,0 +1,168 @@
+# FL Chan / Fruity Dance — choreography manifest (spec §4.2, §4.2.1).
+#
+# **The artwork is Image-Line's and is not in this repository** (spec §1.3). This
+# file is metadata only: timings, energies and Motif tags. It is useless without a
+# copy of `Dance_Large.png` that you obtained yourself.
+#
+# `impact_cell` was not eyeballed. Every cell was measured for the height of its
+# topmost opaque pixel, its bounding-box width and its vertical centroid, and the
+# accent is where the pose is most extreme — highest for a jump, widest for a
+# spread, lowest for a crouch. The measured cycle is noted on each row.
+#
+# Note what this sheet does *not* have: **no anacrusis move.** No row places its
+# accent late in its own loop, so there is nothing that visibly winds up while the
+# music winds up. The `build` pool is therefore left empty rather than filled with a
+# row that does not wind up — spec §11.3's build override finds nothing and falls
+# through to ordinary selection, which is the honest outcome.
+
+[sheet]
+cell_width = 220
+cell_height = 256
+default_row = "Waiting"
+
+# Breathing, essentially. Measured: every cell identical bar a one-pixel dip at
+# cell 3 — the whole row spans 3 px of movement. Four beats per loop because
+# anything faster reads as fidgeting.
+[[row]]
+name = "Waiting"
+index = 0
+impact_cell = 3
+beats_per_loop = 4
+pools = ["idle", "intro", "outro"]
+energy = 0.10
+motif = ["stillness"]
+effort_time = "sustained"
+loopable = true
+
+# Weight shifting on the spot, one step per beat. Measured: centroid falls 156→152
+# over cells 0–3 and repeats 4–7, so the body is lowest — the step landing — at
+# cells 0 and 4. The accent is therefore the first cell, and the wind-up frames
+# arrive from the previous pass of the loop.
+[[row]]
+name = "Stepping"
+index = 1
+impact_cell = 0
+beats_per_loop = 2
+pools = ["verse"]
+energy = 0.30
+motif = ["step"]
+effort_time = "sudden"
+loopable = true
+
+# The one unambiguous accent on the sheet. Measured: crouch at cell 0 (top 64,
+# centroid 166), apex at cell 2 (top 8, centroid 91 — 75 px higher than standing),
+# descent at 3, landing at 4, absorb at 5, recovery 6–7.
+#
+# **Impact is the apex, not the landing.** Crouch and take-off then happen *before*
+# the beat and the figure is at the top of its jump on it, which is the whole
+# anticipation thesis in one row (spec §11.2).
+[[row]]
+name = "Jumping"
+index = 2
+impact_cell = 2
+beats_per_loop = 2
+pools = ["chorus", "drop"]
+energy = 0.95
+motif = ["jump"]
+effort_time = "sudden"
+loopable = true
+
+# Arms out, shuffling. Measured: width 93→112 at cells 1 and 5 — arms at full
+# extension — with the body sinking at 3 and 7. Accent is the extension.
+[[row]]
+name = "Zombie"
+index = 3
+impact_cell = 1
+beats_per_loop = 2
+pools = ["verse"]
+energy = 0.45
+motif = ["gesture", "step"]
+effort_time = "sustained"
+loopable = true
+
+# A wide sweep with a lean. Measured: cells 0 and 4 are widest (147) and lowest
+# (centroid 165); cells 2 and 6 are narrowest (100) and tallest (top 44). The
+# widest frame is the accent, and it is the first cell.
+[[row]]
+name = "Waving"
+index = 4
+impact_cell = 0
+beats_per_loop = 2
+pools = ["verse", "chorus"]
+energy = 0.60
+motif = ["gesture", "expand"]
+effort_time = "sustained"
+loopable = true
+
+# Hips, with almost no vertical travel. Measured: centroid moves one pixel all row;
+# width swings 96→117 at cells 1 and 5. Purely a spreading motion, so the accent is
+# the widest point.
+[[row]]
+name = "Hula"
+index = 5
+impact_cell = 1
+beats_per_loop = 2
+pools = ["verse"]
+energy = 0.35
+motif = ["gesture", "step"]
+effort_time = "sustained"
+loopable = true
+
+# Floor rotation — a breakdance windmill. Measured: centroid 166–185 throughout,
+# far below standing (156), and the top never rises above 84. The body is
+# horizontal for the whole loop.
+#
+# **A continuous rotation has no distinguished frame**, so the accent is cell 0
+# rather than a number picked to look decisive. Width peaks at cell 6, but on a
+# rotation that is just the widest *view*, not an accent.
+[[row]]
+name = "Windmill"
+index = 6
+impact_cell = 0
+beats_per_loop = 2
+pools = ["chorus"]
+energy = 0.92
+motif = ["turn", "sink"]
+effort_time = "sustained"
+loopable = true
+
+# Flailing. Measured: width peaks at cells 2 (146) and 6 (133), the two kicks.
+#
+# Tagged `travel` rather than `step` deliberately. It is not a big move by exertion,
+# but vigorous flailing in a quiet passage reads as wrong, and `travel` (0.70) is
+# what keeps it out of the calm tier while leaving it available from steady up.
+[[row]]
+name = "Zitabata"
+index = 7
+impact_cell = 2
+beats_per_loop = 2
+pools = ["chorus"]
+energy = 0.75
+motif = ["travel"]
+effort_time = "sudden"
+loopable = true
+
+# An upright spin. Measured: width alternates 88↔121 with period 4 — narrow at
+# cells 1 and 5 where the figure is edge-on, wide at 3 and 7 facing front and back.
+# Two edge-on views means one full rotation per pass.
+#
+# Cells 3 and 7 are within a pixel of each other, so the accent is genuinely
+# ambiguous; 3 is chosen over 7 because a seven-cell lead would start the move
+# nearly two beats early and swallow whatever came before it.
+[[row]]
+name = "Dervish"
+index = 8
+impact_cell = 3
+beats_per_loop = 2
+pools = ["chorus"]
+energy = 0.85
+motif = ["turn"]
+effort_time = "sustained"
+loopable = true
+
+# The drag pose. Never selected — the loader finds it by name and excludes it.
+[[row]]
+name = "Held"
+index = 9
+impact_cell = 0
+pools = []

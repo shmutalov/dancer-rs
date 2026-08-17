@@ -113,6 +113,10 @@ fn main() -> anyhow::Result<()> {
     let sheet = Sheet::load(&sheet_path)
         .with_context(|| format!("loading sheet {}", sheet_path.display()))?;
 
+    if args.check_sheet {
+        return run_check_sheet(&sheet);
+    }
+
     let (tx, rx) = crossbeam_channel::unbounded();
 
     // Three ways to get a grid, in order of directness. Without any of them the
@@ -251,7 +255,7 @@ fn is_command_line(argv: &[String]) -> bool {
     argv.iter().any(|a| {
         matches!(
             a.as_str(),
-            "-h" | "--help" | "--scan" | "--write-config" | "--yandex-login"
+            "-h" | "--help" | "--scan" | "--write-config" | "--yandex-login" | "--check-sheet"
         ) || (a.starts_with('-') && !KNOWN_GUI_FLAGS.contains(&a.as_str()))
     })
 }
@@ -394,6 +398,83 @@ fn run_scan(args: &cli::Args, dir: &Path) -> anyhow::Result<()> {
     }
     if report.found == 0 {
         println!("\nNothing to analyse. Supported: {}", library::AUDIO_EXTENSIONS.join(", "));
+    }
+    Ok(())
+}
+
+/// Print how every row of a sheet resolved, then exit.
+///
+/// Reports the *resolved* view — what the scheduler will actually see — rather than
+/// echoing the manifest back. Unparsed `motif` and `effort_time` tags have already
+/// been dropped with a warning by then (spec §4.2.1), so a typo shows up here as a
+/// blank column rather than as a dancer behaving oddly three songs later.
+fn run_check_sheet(sheet: &Sheet) -> anyhow::Result<()> {
+    let rows = row_info(sheet);
+
+    println!(
+        "\n{:<3} {:<10} {:>6} {:>7} {:>7}  {:<22} {:<10} tiers",
+        "#", "row", "impact", "beats", "energy", "motif", "effort"
+    );
+    for r in &rows {
+        if r.held {
+            println!(
+                "{:<3} {:<10} {:>6} {:>7} {:>7}  {:<22} {:<10} (drag pose, never danced)",
+                r.index, r.name, "-", "-", "-", "-", "-"
+            );
+            continue;
+        }
+        // The tiers a row can appear in — the one thing a manifest never states
+        // directly, because it falls out of the Motif exertion (spec §11.3).
+        let tiers: Vec<&str> = [
+            (dancer_choreo::Tier::Calm, "calm"),
+            (dancer_choreo::Tier::Steady, "steady"),
+            (dancer_choreo::Tier::Loud, "loud"),
+        ]
+        .into_iter()
+        .filter(|(t, _)| dancer_choreo::motif::admits(*t, &r.motifs))
+        .map(|(_, n)| n)
+        .collect();
+
+        let motifs: Vec<&str> = r.motifs.iter().map(|m| m.as_str()).collect();
+        println!(
+            "{:<3} {:<10} {:>6} {:>7} {:>7}  {:<22} {:<10} {}",
+            r.index,
+            r.name,
+            r.impact_cell,
+            r.beats_per_loop,
+            r.energy.map(|e| format!("{e:.2}")).unwrap_or_else(|| "-".into()),
+            if motifs.is_empty() { "-".into() } else { motifs.join(", ") },
+            r.effort_time.map(|e| e.as_str()).unwrap_or("-"),
+            tiers.join(" ")
+        );
+    }
+
+    let danceable = rows.iter().filter(|r| !r.held).count();
+    let untagged = rows.iter().filter(|r| !r.held && r.motifs.is_empty()).count();
+    println!("\n{danceable} danceable rows, default `{}`", sheet.rows[sheet.default_row].name);
+    if untagged > 0 {
+        println!(
+            "{untagged} carry no motif and are admitted by every tier — energy alone \
+             will steer them (spec §11.3)."
+        );
+    }
+    for tier in ["calm", "steady", "loud"] {
+        let n = rows
+            .iter()
+            .filter(|r| !r.held)
+            .filter(|r| {
+                let t = match tier {
+                    "calm" => dancer_choreo::Tier::Calm,
+                    "steady" => dancer_choreo::Tier::Steady,
+                    _ => dancer_choreo::Tier::Loud,
+                };
+                dancer_choreo::motif::admits(t, &r.motifs)
+            })
+            .count();
+        // One candidate in a tier means that tier plays one move for the whole
+        // passage, which is the behaviour the project exists to beat.
+        let note = if n < 2 { "  <-- too few to vary" } else { "" };
+        println!("  {tier:<7} {n} rows{note}");
     }
     Ok(())
 }

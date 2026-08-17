@@ -37,6 +37,13 @@ pub struct Args {
     pub write_config: bool,
     /// Sign in to Yandex via the OAuth device flow, store the token, then exit.
     pub yandex_login: bool,
+    /// Load the sheet, print how every row resolved, then exit.
+    ///
+    /// The manifest is the only part of a sheet that cannot be checked by looking
+    /// at it, and a mistyped `motif` is a warning rather than an error (spec
+    /// §4.2.1) — so without this the only way to find one is to notice the dancer
+    /// behaving oddly.
+    pub check_sheet: bool,
     /// Folders to analyse into the cache, then exit.
     ///
     /// The SMTC source can only recognise tracks the library already knows, so
@@ -68,6 +75,7 @@ your music first:
   --no-fetch            Never fetch a streamed track for analysis
   --write-config        Write a complete config.toml and exit
   --yandex-login        Sign in to Yandex Music, store the token, and exit
+  --check-sheet         Print how every row of the sheet resolved, then exit
   --rate <F>            Simulated transport speed, 1.0 nominal
   --stale <SECS>        Report positions this many seconds old
   -h, --help            This text
@@ -93,6 +101,7 @@ pub fn parse<I: Iterator<Item = String>>(args: I) -> Result<Args, String> {
             "--no-fetch" => out.no_fetch = true,
             "--write-config" => out.write_config = true,
             "--yandex-login" => out.yandex_login = true,
+            "--check-sheet" => out.check_sheet = true,
             "--rate" => {
                 let v = value("--rate")?;
                 out.rate = Some(v.parse().map_err(|_| format!("--rate: {v} is not a number"))?);
@@ -144,6 +153,13 @@ mod tests {
         assert_eq!(a.models, Some(PathBuf::from("m")));
         assert!(a.no_cache);
         assert!(a.score.is_none(), "audio alone means analyse");
+    }
+
+    #[test]
+    fn check_sheet_takes_the_positional_sheet() {
+        let a = parse_str("flchan/Dance_Large.png --check-sheet").unwrap();
+        assert!(a.check_sheet);
+        assert_eq!(a.sheet, Some(PathBuf::from("flchan/Dance_Large.png")));
     }
 
     #[test]

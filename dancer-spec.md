@@ -230,6 +230,22 @@ fine, and a dancer that refuses to start over a typo in a metadata field is wors
 than one that ignores the field. This is also how a manifest written against a
 future vocabulary degrades.
 
+That leniency needs a way to check the result, or a typo is only discoverable by
+noticing the dancer behaving oddly. **`dancer-rs <sheet.png> --check-sheet`** prints
+how every row *resolved* — dropped tags show as a blank column — along with the
+tiers each row can appear in, which is the one thing a manifest never states
+directly because it falls out of the exertion. It also counts candidates per tier
+and flags any tier with fewer than two, since one candidate means that tier plays a
+single move for the whole passage.
+
+**Placing `impact_cell` does not have to be guesswork.** For the FL Chan tagging it
+was measured: for every cell, the height of the topmost opaque pixel, the
+bounding-box width and the vertical centroid. A jump peaks at minimum top, a crouch
+maximises the centroid, an arm at full extension maximises width — so the accent is
+whichever cell is most extreme in the axis the move works in.
+`cargo run -p dancer-sprite --example sheet-cells` emits those numbers plus a
+contact strip per row.
+
 ---
 
 ## 5. Score format

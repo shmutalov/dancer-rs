@@ -2,7 +2,17 @@ target/
 
 # FL Chan and other sheets are their authors' artwork, not ours to redistribute
 # (spec §1.3).
-dancer-sheets/
+#
+# The `.toml` manifests are the exception: measured timings and Motif tags, authored
+# here, containing no pixels. They are kept, and they must live beside the PNG
+# because that is the only place the loader looks (spec §4.2).
+#
+# Ignoring `dancer-sheets/` as a *directory* would stop git descending into it, and
+# the negations below would never be reached. So ignore the contents and re-include
+# directories instead.
+dancer-sheets/**
+!dancer-sheets/**/
+!dancer-sheets/**/*.toml
 
 # ONNX weights, ~10 MB, fetched rather than vendored (spec §8.1).
 models/
