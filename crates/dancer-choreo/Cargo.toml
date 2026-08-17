@@ -7,4 +7,5 @@ license.workspace = true
 
 [dependencies]
 dancer-score = { path = "../dancer-score" }
+thiserror.workspace = true
 tracing.workspace = true

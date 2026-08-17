@@ -29,11 +29,15 @@ use std::collections::VecDeque;
 
 use dancer_score::Score;
 
+pub mod effort;
 pub mod energy;
+pub mod motif;
 pub mod rng;
 pub mod select;
 
+pub use effort::{Articulation, Effort};
 pub use energy::{EnergyProfile, Tier};
+pub use motif::Motif;
 pub use rng::Rng;
 pub use select::{Context, RowInfo, ENERGY_WINDOW};
 
@@ -95,6 +99,8 @@ pub struct Scheduler {
     rng: Rng,
     /// Energy distribution of the track being scheduled, rebuilt when it changes.
     profile: EnergyProfile,
+    /// How punctuated each bar of the same track is (spec §11.3).
+    articulation: Articulation,
     profile_for: String,
     /// The move being held, and how many bars it has run for.
     phrase_row: Option<usize>,
@@ -114,6 +120,7 @@ impl Scheduler {
             render_latency: 0.0,
             rng: Rng::new(seed),
             profile: EnergyProfile::default(),
+            articulation: Articulation::default(),
             profile_for: String::new(),
             phrase_row: None,
             phrase_bars: 0,
@@ -179,6 +186,7 @@ impl Scheduler {
         // whole recording, so it cannot be judged one beat at a time.
         if self.profile_for != score.track_id {
             self.profile = EnergyProfile::new(&score.beat_energy);
+            self.articulation = Articulation::new(&score.beat_energy, score.meter);
             self.profile_for = score.track_id.clone();
             self.phrase_row = None;
             self.phrase_bars = 0;
@@ -332,6 +340,7 @@ impl Scheduler {
             // Judged against the tier already in force, so a bar hovering on a
             // boundary does not flip band and cut the phrase (see `energy`).
             tier: raw.map_or(Tier::Steady, |e| self.profile.tier_from(e, self.phrase_tier)),
+            articulation: self.articulation.rank_at(beat),
             label: score.segment_at(t).map(|s| s.label.clone()),
             // A bar cannot be both the run-up and the arrival; arriving wins.
             building: building && !boundary,
@@ -402,6 +411,10 @@ mod tests {
                 impact_cell: 0,
                 pools: vec!["idle".into()],
                 energy: Some(0.15),
+                // Keeping time and nothing more: the move a person actually does
+                // through a quiet passage.
+                motifs: vec![Motif::Step, Motif::Gesture],
+                effort_time: None,
                 loopable: true,
                 held: false,
             },
@@ -414,6 +427,8 @@ mod tests {
                 impact_cell: 3,
                 pools: vec!["verse".into()],
                 energy: Some(0.55),
+                motifs: vec![Motif::Step, Motif::Sink],
+                effort_time: Some(Effort::Sudden),
                 loopable: true,
                 held: false,
             },
@@ -425,6 +440,8 @@ mod tests {
                 impact_cell: 4,
                 pools: vec!["chorus".into()],
                 energy: Some(0.9),
+                motifs: vec![Motif::Turn],
+                effort_time: None,
                 loopable: true,
                 held: false,
             },
@@ -693,7 +710,7 @@ mod tests {
         for e in s.beat_energy[16..].iter_mut() {
             *e = 0.9;
         }
-        let mut sch = sched();
+        let sch = sched();
         // Bar starting at beat 16 = t 8.0.
         let ctx = sch.context(&s, 16);
         assert!(ctx.boundary, "a 0.7 rise across a bar should read as a drop");
@@ -751,6 +768,41 @@ mod tests {
     }
 
     #[test]
+    fn no_turn_is_ever_scheduled_through_the_quiet_passage() {
+        // The same complaint checked across the whole calm section rather than at
+        // one bar, because "it spins during the silent beats" means a turn appearing
+        // *somewhere* in it — which a single-bar assertion can pass right through.
+        // The spin row here is scored 0.9, but it is the Motif that excludes it:
+        // a turn is too big an action for a calm passage at any energy.
+        let s = dynamic_score();
+        let mut sch = sched();
+        sch.plan(&s, 0.0);
+
+        const SPIN: usize = 2;
+        for beat in (40..80).step_by(4) {
+            let ctx = sch.context(&s, beat);
+            assert_eq!(ctx.tier, Tier::Calm, "beat {beat} ranked {:?}", ctx.energy);
+            assert_ne!(sch.choose_for_phrase(&ctx), SPIN, "a turn at beat {beat}");
+        }
+    }
+
+    #[test]
+    fn the_scheduler_measures_articulation_alongside_energy() {
+        // Both interpretations are rebuilt per track and reach selection through
+        // the context; neither is stored in the score.
+        let s = score(0.55);
+        let mut sch = sched();
+        sch.plan(&s, 0.0);
+        assert!(sch.context(&s, 8).articulation.is_some());
+
+        let mut flat = score(0.55);
+        flat.beat_energy.clear();
+        flat.track_id = "test:no-energy".into();
+        sch.plan(&flat, 0.0);
+        assert!(sch.context(&flat, 8).articulation.is_none(), "nothing measured");
+    }
+
+    #[test]
     fn the_ordinary_passage_is_not_treated_as_a_climax() {
         // 89 % of this track sits at one level, so that level is *ordinary*. The
         // dancer should not spend the whole song at full tilt just because the
@@ -759,10 +811,25 @@ mod tests {
         let mut sch = sched();
         sch.plan(&s, 0.0);
         let ctx = sch.context(&s, 100);
-
         assert_eq!(ctx.tier, Tier::Steady, "ranked {:?}", ctx.energy);
-        let chosen = select::choose(&rows(), &ctx, 0, &mut Rng::new(1));
-        assert_ne!(chosen, 0, "and not the idle row either");
+
+        // Cleared: `plan` above left a row in `previous`, and the no-repeat rule
+        // would then be deciding this rather than the tier. What is under test is
+        // how an ordinary energy level is *interpreted*.
+        let ctx = Context { previous: None, ..ctx };
+
+        // Sampled rather than drawn once. Selection is weighted random, so a single
+        // draw asserts something about one seed rather than about the behaviour —
+        // this assertion used to pass only because a third row happened to sit
+        // between the right answer and the wrong one in the weighting.
+        let mut rng = Rng::new(1);
+        let mut counts = [0usize; 3];
+        for _ in 0..500 {
+            counts[select::choose(&rows(), &ctx, 0, &mut rng)] += 1;
+        }
+
+        assert!(counts[1] > counts[0] * 5, "the middle move should dominate: {counts:?}");
+        assert_eq!(counts[2], 0, "and a turn is too big for an ordinary bar: {counts:?}");
     }
 
     #[test]

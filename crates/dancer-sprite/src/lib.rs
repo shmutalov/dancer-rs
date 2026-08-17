@@ -71,6 +71,11 @@ pub struct Row {
     /// Where this row sits on the energy scale, `0.0..1.0`. `None` when the sheet
     /// declares nothing — most inherited sheets, which have no manifest at all.
     pub energy: Option<f32>,
+    /// Motif tags naming what the move is, e.g. `["step", "gesture"]` (spec §4.2).
+    /// Unparsed — see [`RowManifest::motif`].
+    pub motifs: Arc<[String]>,
+    /// `"sudden"` or `"sustained"`, unparsed for the same reason.
+    pub effort_time: Option<String>,
     /// Whether the row can repeat. A one-shot returns to the default row when done.
     pub loopable: bool,
 }
@@ -187,6 +192,8 @@ impl Sheet {
                 impact_cell: rm.map_or(0, |m| m.impact_cell),
                 pools: rm.map(|m| m.pools.clone().into()).unwrap_or_else(|| Vec::new().into()),
                 energy: rm.and_then(|m| m.energy),
+                motifs: rm.map(|m| m.motif.clone().into()).unwrap_or_else(|| Vec::new().into()),
+                effort_time: rm.and_then(|m| m.effort_time.clone()),
                 loopable: rm.is_none_or(|m| m.loopable),
             });
         }

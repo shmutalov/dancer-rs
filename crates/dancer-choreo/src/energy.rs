@@ -25,6 +25,39 @@
 //! belong to whoever is deciding. It also means no cached score has to be thrown
 //! away when the interpretation changes.
 
+/// Where `value` sits in an ascending distribution, `0.0..1.0`.
+///
+/// Shared with [`crate::effort`], which ranks a different measurement the same way
+/// and for the same reason — an absolute number means nothing without the track it
+/// came from.
+///
+/// Midpoint of the tied range, not the count strictly below. Music has plateaus —
+/// most of a track sits at one level — and ranking by "strictly below" puts a
+/// plateau covering 90 % of the track at rank 0.10, which would call the *normal*
+/// level quiet. Splitting the tie places a plateau at its own middle, so the common
+/// level reads as ordinary and only genuine peaks and lulls reach the extremes.
+pub(crate) fn rank_in(sorted: &[f32], value: f32) -> Option<f32> {
+    if sorted.is_empty() {
+        return None;
+    }
+    if sorted.len() == 1 {
+        // One data point cannot describe a distribution. Mid-scale is the honest
+        // answer: it steers towards neither extreme.
+        return Some(0.5);
+    }
+    let below = sorted.partition_point(|&v| v < value) as f32;
+    let at_or_below = sorted.partition_point(|&v| v <= value) as f32;
+    let mid = (below + at_or_below) / 2.0;
+    Some((mid / sorted.len() as f32).clamp(0.0, 1.0))
+}
+
+/// Sort a measurement into an ascending distribution, dropping anything unusable.
+pub(crate) fn distribution(values: impl IntoIterator<Item = f32>) -> Vec<f32> {
+    let mut sorted: Vec<f32> = values.into_iter().filter(|v| v.is_finite()).collect();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    sorted
+}
+
 /// Energy distribution of one track, for rank lookups.
 #[derive(Debug, Clone, Default)]
 pub struct EnergyProfile {
@@ -33,9 +66,9 @@ pub struct EnergyProfile {
 
 impl EnergyProfile {
     pub fn new(beat_energy: &[f32]) -> Self {
-        let mut sorted: Vec<f32> = beat_energy.iter().copied().filter(|v| v.is_finite()).collect();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        Self { sorted }
+        Self {
+            sorted: distribution(beat_energy.iter().copied()),
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -47,24 +80,7 @@ impl EnergyProfile {
     /// `None` when nothing was measured — the caller then has no energy to steer
     /// by, which is different from having measured silence.
     pub fn rank(&self, value: f32) -> Option<f32> {
-        if self.sorted.is_empty() {
-            return None;
-        }
-        if self.sorted.len() == 1 {
-            // One data point cannot describe a distribution. Mid-scale is the
-            // honest answer: it steers towards neither extreme.
-            return Some(0.5);
-        }
-        // Midpoint of the tied range, not the count strictly below. Music has
-        // plateaus — most of a track sits at one level — and ranking by
-        // "strictly below" puts a plateau covering 90 % of the track at rank
-        // 0.10, which would call the *normal* level quiet. Splitting the tie
-        // places a plateau at its own middle, so the common level reads as
-        // ordinary and only genuine peaks and lulls reach the extremes.
-        let below = self.sorted.partition_point(|&v| v < value) as f32;
-        let at_or_below = self.sorted.partition_point(|&v| v <= value) as f32;
-        let mid = (below + at_or_below) / 2.0;
-        Some((mid / self.sorted.len() as f32).clamp(0.0, 1.0))
+        rank_in(&self.sorted, value)
     }
 
     /// Coarse band, for deciding whether the music has actually changed character.

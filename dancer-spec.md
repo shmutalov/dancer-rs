@@ -151,6 +151,8 @@ index = 0
 impact_cell = 0
 beats_per_loop = 2
 pools = ["idle", "intro", "outro"]
+motif = ["step", "gesture"]   # keeping time, and the hands a little
+effort_time = "sustained"
 loopable = true
 
 [[row]]
@@ -160,6 +162,8 @@ impact_cell = 3        # the accent lands here — schedule the START before the
 beats_per_loop = 1
 pools = ["verse", "chorus"]
 energy = 0.5
+motif = ["step", "sink"]
+effort_time = "sudden"
 loopable = true
 
 [[row]]
@@ -169,6 +173,7 @@ impact_cell = 4
 beats_per_loop = 4
 pools = ["chorus"]
 energy = 0.9
+motif = ["turn"]       # a big action: loud passages and drops only
 loopable = false       # one-shot; returns to default_row after
 
 [[row]]
@@ -187,6 +192,43 @@ pools = []
 
 **`impact_cell` is the single most important field in this document.** Everything
 about the anticipation behaviour derives from it.
+
+### 4.2.1 `motif` and `effort_time` (M4)
+
+Both are borrowed from Rudolf Laban, and both are optional. Every inherited sheet
+omits them, and selection degrades to energy alone when they are absent.
+
+`motif` names **what the move is**, in the vocabulary of Motif Notation — Laban's
+own simplified subset of Labanotation, meant for describing the essence of an action
+rather than reproducing it limb by limb. That is the level that transfers here: full
+Labanotation drives a skeleton, and a sprite sheet has eight pre-drawn cells, so
+there is no pose to synthesise. Accepted tags, each with a fixed intrinsic exertion:
+
+| tag | exertion | | tag | exertion |
+|---|---|---|---|---|
+| `stillness` | 0.00 | | `rise` | 0.50 |
+| `gesture` | 0.20 | | `expand` | 0.55 |
+| `step` | 0.30 | | `travel` | 0.70 |
+| `contract` | 0.35 | | `turn` | 0.85 |
+| `sink` | 0.40 | | `jump` | 1.00 |
+
+The numbers are a ranking of actions against each other, not a measurement of
+anything. The *ordering* is what matters — that a jump costs more than a step, and a
+turn more than a travel.
+
+Laban's own terms and the obvious English words both parse (`spring` = `jump`,
+`enclose` = `contract`), because sheet authors are not notators. A row's exertion is
+the **largest** of its motifs: a move containing a jump reads as a jump.
+
+`effort_time` is Laban Movement Analysis's Time Effort — `"sudden"` or
+`"sustained"`. Of LMA's four Efforts, Weight is roughly what `energy` already
+measures and Time is the one that was missing; Space and Flow describe intent that
+nothing in a beat grid implies, so they are not offered.
+
+An unrecognised tag is **a warning at load, not a load failure**. The artwork is
+fine, and a dancer that refuses to start over a typo in a metadata field is worse
+than one that ignores the field. This is also how a manifest written against a
+future vocabulary degrades.
 
 ---
 
@@ -875,10 +917,16 @@ Each frame, the render thread evaluates `clock.position(now)`, pops any move who
 
 Given the segment label at the target beat and its energy:
 
-1. Filter rows whose `pools` contain the segment label.
-2. Filter by energy proximity: `|row.energy - segment.energy| < 0.35`.
-3. Exclude the row used in the previous bar (no immediate repeats).
-4. Weighted random from what remains; fall back to `default_row` if empty.
+1. Filter by **Motif admissibility**: drop rows whose exertion exceeds this tier's
+   ceiling (M4, below). Untagged rows always pass.
+2. Filter rows whose `pools` contain the segment label.
+3. Filter by energy proximity: `|row.energy - segment.energy| < 0.35`.
+4. Exclude the row used in the previous bar (no immediate repeats).
+5. Weighted random from what remains, by energy proximity **and Time Effort
+   agreement** (M4, below); fall back to `default_row` if empty.
+
+Every filter is dropped rather than allowed to empty the pool. A sheet whose every
+move is a jump must still dance to quiet music.
 
 **Energy is ranked within the track, not taken raw** (M4). `beat_energy` is RMS over
 the track's own 95th percentile, which sounds relative but destroys the axis:
@@ -891,6 +939,40 @@ Selection therefore maps each value to its **rank within the track** — quietes
 most of a track reads as *ordinary* rather than as a climax. This is an
 interpretation, so it lives in the scheduler; the score keeps the measurement.
 
+**Energy alone is too thin an axis** (M4). One scalar cannot tell a small gesture
+from a small travelling step, and nothing in it stops a full spin being chosen for a
+quiet bar as long as its declared number lands in the window. The complaint that
+prompted this — *"dancer jumps and spins when there are just silent beats; a human
+would stay in beat only by moving its feet, and maybe its hands a little"* — is a
+statement in Motif vocabulary, and the manifest had no way to say it. Two rules from
+Laban (§4.2.1) close the gap:
+
+- **A tier ceiling on Motif exertion.** Calm admits up to 0.40 — stillness, gesture,
+  stepping, enclosing, sinking; keeping time without doing anything. Steady admits up
+  to 0.80, which adds rising, spreading and travelling. Loud admits everything. A
+  turn is therefore inadmissible in a calm passage *whatever* energy the sheet
+  declared for it, which is the part `energy` could not express.
+- **Time Effort agreement**, as a weighting rather than a filter. A row's declared
+  `sudden`/`sustained` is matched against how punctuated the bar is, worth a factor
+  of `1 ± 0.5`.
+
+**The build override obeys the ceiling; the drop override does not.** A wind-up is
+*preparation* — it precedes the accent, so it should be smaller than what follows.
+A drop *is* the accent, so it may reach past the ceiling for the biggest move
+available, and "biggest" counts a `motif = ["jump"]` row whether or not its author
+also put a number on it. Found in testing: the build rule was reaching straight past
+the ceiling for a spin, putting a full turn in the last quiet bar before a chorus —
+the original complaint wearing a different hat.
+
+**Articulation is a proxy, and worth being plain about** (M4). True Time Effort would
+come from onset sharpness, which needs an envelope at finer resolution than the one
+RMS per beat that `beat_energy` stores. What is measured instead is the mean absolute
+beat-to-beat energy change across a bar, ranked within the track: high means
+punctuated and suits sudden moves, low means flowing and suits sustained ones. It
+weights rather than filters precisely because confidence in it is lower than in the
+Motif rules. Like energy ranking, it is computed in the scheduler and not stored, so
+changing it invalidates no cached score.
+
 **A move is held for a phrase, not redrawn every bar** (M4). Re-rolling each bar was
 the first implementation and it does not read as dancing — a person picks something
 and does it for a few bars. Moves are held for four bars, cut short only when the
@@ -899,7 +981,7 @@ music actually changes: a new energy tier, a drop, or a run-up. Tier changes car
 band every bar and cuts every phrase to one, which is the erratic changing the
 phrase rule exists to prevent.
 
-**Step 2 needs a widening rule** (M3). A hard threshold assumes the track has
+**Step 3 needs a widening rule** (M3). A hard threshold assumes the track has
 dynamics. Measured on an analysed track sitting at 0.89 energy throughout, exactly
 one row of the default sheet fell inside the window, so the dancer repeated one move
 for the whole track — the FAOSDance behaviour this project exists to beat. Loudness-
@@ -909,7 +991,7 @@ window**: reaching further would put a full-energy spin in a quiet intro, which 
 worse failure than repeating a move. Rank ties break on row index, so a
 choreography stays reproducible from its seed.
 
-**Unlabelled scores.** Scores from §8.1 have no segments, so step 1 has nothing to
+**Unlabelled scores.** Scores from §8.1 have no segments, so step 2 has nothing to
 match on. Selection then keys on **energy tier and boundary position** instead,
 with labels treated as enrichment when present: bucket the local RMS into tiers,
 pick from rows whose `energy` sits in the current tier, and treat a novelty peak on

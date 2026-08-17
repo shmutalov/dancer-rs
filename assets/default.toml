@@ -1,4 +1,7 @@
 # Neutral default sheet. See spec §4.2.
+#
+# `motif` names what the move *is*, in Laban's Motif vocabulary. It is what stops a
+# turn being chosen for a quiet passage — `energy` alone could never say that.
 [sheet]
 cell_width = 110
 cell_height = 128
@@ -11,6 +14,8 @@ impact_cell = 0
 beats_per_loop = 4
 pools = ["idle", "intro", "outro"]
 energy = 0.15
+motif = ["step", "gesture"]   # keeping time, and the hands a little
+effort_time = "sustained"
 loopable = true
 
 [[row]]
@@ -20,6 +25,8 @@ impact_cell = 3        # knees deepest here — schedule the START before the be
 beats_per_loop = 2
 pools = ["verse", "chorus"]
 energy = 0.55
+motif = ["step", "sink"]
+effort_time = "sudden"
 loopable = true
 
 [[row]]
@@ -29,6 +36,7 @@ impact_cell = 4
 beats_per_loop = 2
 pools = ["chorus"]
 energy = 0.9
+motif = ["turn"]       # a big action: loud passages and drops only
 loopable = true
 
 [[row]]

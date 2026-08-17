@@ -2,8 +2,8 @@
 //!
 //! M0 consumes only `cell_width`, `cell_height`, `default_row` and row names.
 //! The choreography fields — `impact_cell`, `beats_per_loop`, `pools`, `energy`,
-//! `loopable` — are parsed and carried so that manifests written now stay valid,
-//! but nothing reads them until M3.
+//! `motif`, `effort_time`, `loopable` — are parsed and carried so that manifests
+//! written now stay valid; the scheduler reads them from M3 on.
 
 use std::path::Path;
 
@@ -42,6 +42,16 @@ pub struct RowManifest {
     pub pools: Vec<String>,
     #[serde(default)]
     pub energy: Option<f32>,
+    /// What the move *is*, in Motif vocabulary — `["step", "gesture"]` (spec §4.2).
+    ///
+    /// Kept as strings here rather than parsed: this crate loads artwork and must
+    /// not depend on the scheduler. `dancer-app` resolves them, so an unrecognised
+    /// tag is a warning at load rather than a sheet that refuses to open.
+    #[serde(default)]
+    pub motif: Vec<String>,
+    /// `"sudden"` or `"sustained"` — the row's Laban Time Effort.
+    #[serde(default)]
+    pub effort_time: Option<String>,
     #[serde(default = "yes")]
     pub loopable: bool,
 }
@@ -142,11 +152,15 @@ mod tests {
             name = "bounce"
             impact_cell = 3
             pools = ["verse", "chorus"]
+            motif = ["step", "sink"]
+            effort_time = "sudden"
         "#,
         )
         .unwrap();
         let r = &m.rows[0];
         assert_eq!(r.impact_cell, 3);
+        assert_eq!(r.motif, ["step", "sink"]);
+        assert_eq!(r.effort_time.as_deref(), Some("sudden"));
         // Two beats, not one: one 8-cell pass per beat reads as frantic at
         // ordinary tempos. See `default_beats_per_loop`.
         assert_eq!(r.beats_per_loop, 2);

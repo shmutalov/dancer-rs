@@ -584,6 +584,7 @@ name = "dancer-choreo"
 version = "0.1.0"
 dependencies = [
  "dancer-score",
+ "thiserror 2.0.20",
  "tracing",
 ]
 

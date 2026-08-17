@@ -412,8 +412,32 @@ fn row_info(sheet: &Sheet) -> Vec<dancer_choreo::RowInfo> {
             impact_cell: r.impact_cell,
             pools: r.pools.to_vec(),
             energy: r.energy,
+            motifs: parse_tags(&r.motifs, &r.name),
+            effort_time: r.effort_time.as_deref().and_then(|s| {
+                dancer_choreo::Effort::parse(s).or_else(|| {
+                    tracing::warn!(row = %r.name, effort_time = s, "unknown effort_time; ignoring");
+                    None
+                })
+            }),
             loopable: r.loopable,
             held: Some(i) == sheet.held_row,
+        })
+        .collect()
+}
+
+/// Resolve a row's Motif tags, warning on anything unrecognised.
+///
+/// A bad tag must not stop the sheet loading: the artwork is fine, and a dancer
+/// that refuses to start because of a typo in a metadata field is worse than one
+/// that ignores the field. This is also where a manifest written for a future
+/// vocabulary degrades gracefully rather than failing.
+fn parse_tags(tags: &[String], row: &str) -> Vec<dancer_choreo::Motif> {
+    tags.iter()
+        .filter_map(|t| {
+            dancer_choreo::Motif::parse(t).or_else(|| {
+                tracing::warn!(row = %row, motif = %t, "unknown motif; ignoring");
+                None
+            })
         })
         .collect()
 }
