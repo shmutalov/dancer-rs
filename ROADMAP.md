@@ -237,7 +237,7 @@ M4's value is real.
 | **M3** | **Anticipation scheduler** — built 2026-08-15, **A/B not yet judged** | `impact_cell` respected; A/B against M1 shows a difference visible to someone not told what changed |
 | **M4** | SMTC source, tag reading, library scanner, **Yandex fetcher** — **done 2026-08-17** | Identity, position and pause/resume from a desktop player; correct freeze and resume-on-downbeat. Grew past its brief: §5.9's reversal pulled the Yandex fetch-analyse-delete path in two milestones early |
 | **M5** | Tray UI, config, packaging | Installable by a stranger |
-| **M6** | *Optional:* segment labels, Spotify, Yandex canonical IDs | Only if M5 shows unlabelled pools are the visible gap. The Yandex **fetcher** landed in M4; the **resolver** is what is left — see §5.8 |
+| **M6** | *Optional:* Yandex canonical IDs, segment labels | Only if M5 shows unlabelled pools are the visible gap. The Yandex **fetcher** landed in M4; the **resolver** is what is left — see §5.8. Spotify cut 2026-08-17 (spec §6.3) |
 
 Two milestones were cut, not renamed. The old M5 (WASAPI loopback) and M6
 (learn-on-second-listen) are gone with the audio subsystem — see §4.1.
@@ -635,18 +635,23 @@ Surface it in the UI so it does not read as a bug.
 
 Ordered by expected value, none on the critical path.
 
-1. **Segment labels.** Only if M5 shows unlabelled pools are the visible gap.
-   Cheapest route is the Python `allin1` sidecar (spec §8.1) as pure enrichment:
-   newline-delimited JSON over stdio, supplying `segments` and `cues` on top of a
-   grid we already have. NATTEN remains a Windows barrier, but now for an optional
-   feature rather than the product.
-2. **Yandex canonical track IDs.** A `TrackIdResolver`, *not* a `Source` — see §5.8.
+1. **Yandex canonical track IDs.** A `TrackIdResolver`, *not* a `Source` — see §5.8.
    The Yandex **fetcher** shipped early, in M4; this is the other half, and the two
    are independent. Buys cache keys that cannot collide, replacing the hashed
    `(title, artist)`. `yamuse` already carries catalogue search, so the dependency
-   is paid for; `yandex-music` (vyfor) remains the fallback.
-3. **Spotify adapter.** `rspotify` OAuth PKCE. Buys canonical IDs and coverage when
-   playback is on another device where SMTC sees nothing. Costs an auth flow.
+   is paid for; `yandex-music` (vyfor) remains the fallback. Cheap, pure Rust, no
+   new dependency — the only M6 item that is.
+2. **Segment labels.** Only if unlabelled pools turn out to be the visible gap.
+   Cheapest route is the Python `allin1` sidecar (spec §8.1) as pure enrichment:
+   newline-delimited JSON over stdio, supplying `segments` and `cues` on top of a
+   grid we already have. NATTEN remains a Windows barrier, and this would reintroduce
+   the Python deployment problem §1 exists to avoid — so the bar is high. The Motif
+   and tier work in M4 (spec §11.3) made unlabelled selection markedly better, which
+   raises that bar further.
+3. ~~**Spotify adapter.**~~ **Cut 2026-08-17.** Not a universal player integration;
+   Yandex Music is the only service that needs one. Spotify desktop keeps working
+   through SMTC like any other player — what is cut is a dedicated adapter, not
+   support for the app. See spec §6.3.
 
 ---
 

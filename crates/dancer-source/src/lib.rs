@@ -11,12 +11,16 @@
 //!
 //! The adapters divide cleanly. SMTC (M4) is WinRT, whose async operations expose a
 //! blocking `join()` — Phase 0.5 used exactly that — and it runs on its own thread
-//! anyway (spec §3.2), where blocking is the point. Spotify and Yandex (M6) are
-//! HTTP and genuinely want async, but they will bring their own runtime with them.
+//! anyway (spec §3.2), where blocking is the point. An HTTP adapter would genuinely
+//! want async, but it would bring its own runtime with it.
 //!
-//! So the cost of deferring is one `Source` impl wrapping `block_on` when an HTTP
-//! adapter first appears, and the cost of not deferring is a runtime dependency
-//! carried from M1 to M6 for nothing. Revisit at M6, not before.
+//! So the cost of deferring is one `Source` impl wrapping `block_on` if such an
+//! adapter ever appears, and the cost of not deferring is a runtime dependency
+//! carried from M1 for nothing.
+//!
+//! Held up in M4. Yandex arrived and brought tokio, but not as a `Source`: the
+//! fetch (spec §6.4.1) builds a single-threaded runtime on its own thread and drops
+//! it when the track is done. No `Source` is async and nothing else sees a runtime.
 
 use std::time::{Duration, Instant};
 

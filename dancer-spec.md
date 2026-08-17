@@ -66,7 +66,7 @@ sheet or none at all.
 | **Held row** | By FAOSDance convention, the last row — played while the user drags the sprite. |
 | **Score** | The pre-computed analysis of one track: beat grid, downbeats, sections, cues. |
 | **Anchor** | A (media_position, local_instant) pair from which the local clock extrapolates. |
-| **Source** | An external player adapter (Spotify, Yandex, SMTC, local file). |
+| **Source** | An external player adapter. Two exist: SMTC and the local file (§6.5). |
 | **Lock** | The state in which a score is loaded and the clock is confidently aligned. |
 
 ---
@@ -86,7 +86,7 @@ dancer-rs/
 │   ├── dancer-score/       Score types, SQLite cache store, library index
 │   ├── dancer-clock/       BeatClock, drift correction, phase estimation
 │   ├── dancer-choreo/      Move selection, anticipation scheduling
-│   ├── dancer-source/      `Source` trait + adapters (smtc, spotify, yandex, file)
+│   ├── dancer-source/      `Source` trait + adapters (smtc, file)
 │   ├── dancer-analyze/     beat-this grids, optional sidecar client
 │   └── dancer-app/         Binary: wiring, tray icon, config, state machine
 └── sidecar/                Optional (M6). Python: allin1 wrapper for segment labels
@@ -100,7 +100,7 @@ No shared mutable state, no locks in the render path.
 | Thread | Purpose | Cadence |
 |---|---|---|
 | **Render** (main) | winit event loop, clock evaluation, blitting | 60 Hz, vsync-ish |
-| **Source poll** | tokio runtime; HTTP polls to Spotify/Yandex | 2–5 s |
+| **Source poll** | SMTC session read on its own thread (§6.2) | 0.5 s |
 | **SMTC listener** | WinRT event subscriptions (session/media/timeline changed) | event-driven |
 | **Analysis** | `beat-this` inference; optional sidecar subprocess | on demand |
 
@@ -425,11 +425,10 @@ wrong when paired with `Instant::now()`.
 it is not free — `async_trait` boxes every call and an async trait implies a tokio
 runtime in the workspace. The adapters divide cleanly: SMTC (M4) is WinRT, whose
 async operations expose a blocking `join()` — Phase 0.5 used exactly that — and it
-runs on its own thread anyway (§3.2), where blocking is the point. Spotify and
-Yandex (M6) genuinely want async and will bring their own runtime. So deferring
-costs one `Source` impl wrapping `block_on` when an HTTP adapter first appears, and
-not deferring costs a runtime dependency carried from M1 to M6 for nothing.
-Revisit at M6.
+runs on its own thread anyway (§3.2), where blocking is the point. An HTTP adapter
+would genuinely want async and would bring its own runtime. So deferring costs one
+`Source` impl wrapping `block_on` if one ever appears, and not deferring costs a
+runtime dependency carried from M1 for nothing.
 
 **Held up, M4.** Yandex arrived early (§6.4.1) and brought tokio with it, but not as
 a `Source`: the fetch builds a single-threaded runtime on its own thread and drops it
@@ -492,23 +491,27 @@ an English install.
   owned-music path rests on (§8.3), so the normalisation rules deserve real tests
   and a fixture set of awkward titles.
 
-### 6.3 Spotify adapter (optional, better IDs)
+### 6.3 Spotify adapter — cut 2026-08-17
 
-`rspotify` with OAuth PKCE. Endpoint `GET /v1/me/player/currently-playing` gives
-`progress_ms`, `is_playing`, and a stable track URI.
+**Never built, and no longer planned.** The owner's scope: this is not a universal
+player integration, and Yandex Music is the only service that needs one. Nothing is
+lost in code — there was never an `rspotify` dependency or a `spotify` adapter, only
+the plan below.
 
-Advantages over SMTC: canonical track ID, works when Spotify plays on another
-device (phone, Connect speaker) where SMTC sees nothing.
+What it would have bought: a canonical track ID, and coverage when Spotify plays on
+another device (phone, Connect speaker) where SMTC sees nothing. What it would have
+cost: an OAuth flow, rate-limited HTTP at ~1 s granularity, and network latency in
+the `observed_at` pairing — all to serve a service the user does not use.
 
-Disadvantages: rate-limited HTTP, ~1 s granularity, network latency in the
-`observed_at` pairing, requires user auth flow.
+It was already **not a score source**. Spotify's `audio-analysis` and
+`audio-features` endpoints historically returned a full beat/bar/section breakdown,
+and access was restricted for new applications. That mattered when it looked like a
+drop-in replacement for the offline pipeline; with §8.1 computing grids locally, it
+did not.
 
-**No longer a score source.** Spotify's `audio-analysis` and `audio-features`
-endpoints historically returned a full beat/bar/section breakdown, and access was
-restricted for new applications. This mattered when it looked like a drop-in
-replacement for the offline pipeline; with §8.1 computing grids locally, it
-doesn't. Treat Spotify purely as an identity/position source and don't spend time
-resolving its availability.
+**Spotify desktop still works**, and this changes nothing about that. It publishes
+to SMTC like any other player, so §6.2 gives it identity, position and pause/resume.
+What is cut is a *dedicated adapter*, not support for the app.
 
 ### 6.4 Yandex Music adapter (optional)
 
@@ -1141,7 +1144,7 @@ x = 0.82
 y = 0.65
 
 [sources]
-order = ["spotify", "smtc"]
+order = ["smtc"]                   # SMTC and the local file are the only adapters
 # Empty means "accept every session", and that is the shipped default. AUMIDs are
 # localised — Yandex Music desktop is `Яндекс Музыка.exe`, not `YandexMusic.exe` —
 # so this is built from sessions actually observed, never from a table (§6.2).
@@ -1150,8 +1153,8 @@ poll_interval_ms = 3000
 
 # Manual output-latency trim per source app, milliseconds. See §9.2.
 [offset_ms]
-"Spotify.exe" = 180
-"chrome.exe"  = 250
+"Яндекс Музыка.exe" = 180           # AUMIDs are localised — see §6.2
+"chrome.exe"        = 250
 
 # Folders scanned and analysed so SMTC-reported tracks can be matched to a
 # file we already have a grid for. See §8.3.
@@ -1189,7 +1192,7 @@ table below.
 | **M3** | Anticipation scheduler | `impact_cell` respected; A/B against M1 shows the difference is visible |
 | **M4** | SMTC source | Identity, position and pause/resume from Spotify desktop; correct freeze and resume-on-downbeat behaviour |
 | **M5** | Tray UI, config, packaging | Installable by a stranger |
-| **M6** | *Optional:* segment labels, Spotify, Yandex canonical IDs | Only if M5 shows unlabelled pools are the visible gap. The Yandex **fetcher** landed early, in M4 (§6.4.1); the **resolver** did not, and is what is left here |
+| **M6** | *Optional:* Yandex canonical IDs, segment labels | Only if M5 shows unlabelled pools are the visible gap. The Yandex **fetcher** landed early, in M4 (§6.4.1); the **resolver** did not, and is what is left here. Spotify cut 2026-08-17 (§6.3) |
 
 The old M5 (WASAPI loopback) and M6 (learn-on-second-listen) were cut with the
 audio subsystem — see §7.
@@ -1217,7 +1220,6 @@ plumbing to feed it.
 | `rten` | ML runtime backing `beat-this`; `ort` behind a feature flag for cross-check |
 | `symphonia` / `rubato` | Audio decode and resampling (arrive via `beat-this`) |
 | `tokio` + `reqwest` | Async source polling |
-| `rspotify` | Spotify Web API + OAuth PKCE (M6) |
 | `yamuse` | Yandex catalogue search, download-info and OAuth device flow (M4, §6.4.1). Chosen for ynison push-position, which is **unused**; `yandex-music` remains the fallback for the unbuilt resolver role |
 | `serde` / `serde_json` / `toml` | Score, manifest, config |
 | `rusqlite` (`bundled`) | Single-file score cache and library index (§5.1) |
