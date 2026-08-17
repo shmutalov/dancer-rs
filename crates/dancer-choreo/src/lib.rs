@@ -29,9 +29,11 @@ use std::collections::VecDeque;
 
 use dancer_score::Score;
 
+pub mod energy;
 pub mod rng;
 pub mod select;
 
+pub use energy::{EnergyProfile, Tier};
 pub use rng::Rng;
 pub use select::{Context, RowInfo, ENERGY_WINDOW};
 
@@ -40,6 +42,15 @@ pub const LOOKAHEAD: f64 = 2.0;
 
 /// Energy rise across a bar that counts as a boundary.
 const RISE_THRESHOLD: f32 = 0.15;
+
+/// Bars a move is held before another is chosen.
+///
+/// Re-rolling every bar was the first implementation and it does not read as
+/// dancing: a person picks something and does it for a phrase. Four bars is the
+/// shortest unit that sounds like one in most popular music, and holding is
+/// overridden the moment the music actually changes — a new energy tier, a drop,
+/// or a run-up all cut the phrase short.
+pub const PHRASE_BARS: u32 = 4;
 
 /// One planned move.
 #[derive(Debug, Clone, PartialEq)]
@@ -82,6 +93,13 @@ pub struct Scheduler {
     planned_to: f64,
     render_latency: f64,
     rng: Rng,
+    /// Energy distribution of the track being scheduled, rebuilt when it changes.
+    profile: EnergyProfile,
+    profile_for: String,
+    /// The move being held, and how many bars it has run for.
+    phrase_row: Option<usize>,
+    phrase_bars: u32,
+    phrase_tier: Tier,
 }
 
 impl Scheduler {
@@ -95,6 +113,11 @@ impl Scheduler {
             planned_to: f64::NEG_INFINITY,
             render_latency: 0.0,
             rng: Rng::new(seed),
+            profile: EnergyProfile::default(),
+            profile_for: String::new(),
+            phrase_row: None,
+            phrase_bars: 0,
+            phrase_tier: Tier::Steady,
         }
     }
 
@@ -129,6 +152,8 @@ impl Scheduler {
         self.current = None;
         self.previous_row = None;
         self.planned_to = f64::NEG_INFINITY;
+        self.phrase_row = None;
+        self.phrase_bars = 0;
     }
 
     /// Drop everything and schedule nothing until the next bar starts.
@@ -150,6 +175,15 @@ impl Scheduler {
     ///
     /// Idempotent per bar: calling this every frame is the intended usage.
     pub fn plan(&mut self, score: &Score, position: f64) {
+        // Rebuilt per track, not per call: what counts as loud depends on the
+        // whole recording, so it cannot be judged one beat at a time.
+        if self.profile_for != score.track_id {
+            self.profile = EnergyProfile::new(&score.beat_energy);
+            self.profile_for = score.track_id.clone();
+            self.phrase_row = None;
+            self.phrase_bars = 0;
+        }
+
         let horizon = position + LOOKAHEAD;
 
         // The window starts a lookahead *behind* the position, not at it. Starting
@@ -205,7 +239,8 @@ impl Scheduler {
     fn plan_bar(&mut self, score: &Score, beat: usize) -> Option<ScheduledMove> {
         let target = *score.beats.get(beat)?;
         let ctx = self.context(score, beat);
-        let row_idx = select::choose(&self.rows, &ctx, self.fallback, &mut self.rng);
+
+        let row_idx = self.choose_for_phrase(&ctx);
         let row = self.rows.get(row_idx).or_else(|| self.rows.get(self.fallback))?;
 
         // Local beat interval across the loop, not the global BPM (spec §11.1).
@@ -230,12 +265,51 @@ impl Scheduler {
         })
     }
 
+    /// Keep dancing the current move, or pick a new one.
+    ///
+    /// A person picks something and does it for a phrase; they do not redraw every
+    /// two seconds. So a move is held for [`PHRASE_BARS`] unless the music gives a
+    /// reason to change — the energy tier moves, a drop lands, or a run-up starts.
+    /// Those overrides matter more than the holding: a phrase that ignored a drop
+    /// would read as the dancer not listening.
+    fn choose_for_phrase(&mut self, ctx: &Context) -> usize {
+        let tier = ctx.tier;
+        let must_change = ctx.boundary
+            || ctx.building
+            || tier != self.phrase_tier
+            || self.phrase_bars >= PHRASE_BARS;
+
+        if let Some(row) = self.phrase_row {
+            if !must_change {
+                self.phrase_bars += 1;
+                return row;
+            }
+        }
+
+        // A new phrase should not be blocked from repeating the previous move
+        // when that is genuinely the best fit — the no-repeat rule exists to stop
+        // the *same bar* recurring, not to forbid a section from coming back.
+        let ctx = Context {
+            previous: if tier == self.phrase_tier { ctx.previous } else { None },
+            ..ctx.clone()
+        };
+        let row = select::choose(&self.rows, &ctx, self.fallback, &mut self.rng);
+        self.phrase_row = Some(row);
+        self.phrase_bars = 1;
+        self.phrase_tier = tier;
+        row
+    }
+
     /// What the music is doing around `beat`, for selection.
     fn context(&self, score: &Score, beat: usize) -> Context {
         let t = score.beats[beat];
         let m = score.meter.max(1) as usize;
 
-        let energy = score.energy_at(t);
+        // Ranked within the track, not taken raw. Raw values are ratios against
+        // the track's own loudest moment and cluster in the top half of the scale,
+        // which made every passage look energetic — see `energy`.
+        let raw = score.energy_at(t);
+        let energy = raw.and_then(|e| self.profile.rank(e)).or(raw);
         let here = bar_energy(score, beat, m);
         let prev = beat.checked_sub(m).and_then(|i| bar_energy(score, i, m));
         let next = bar_energy(score, beat + m, m);
@@ -255,6 +329,9 @@ impl Scheduler {
 
         Context {
             energy,
+            // Judged against the tier already in force, so a bar hovering on a
+            // boundary does not flip band and cut the phrase (see `energy`).
+            tier: raw.map_or(Tier::Steady, |e| self.profile.tier_from(e, self.phrase_tier)),
             label: score.segment_at(t).map(|s| s.label.clone()),
             // A bar cannot be both the run-up and the arrival; arriving wins.
             building: building && !boundary,
@@ -644,6 +721,87 @@ mod tests {
             beats,
             ..score(0.55)
         }
+    }
+
+    /// A track that is loud throughout but has a genuinely quiet passage —
+    /// the shape that produced "it spins during the silent beats".
+    fn dynamic_score() -> Score {
+        let mut s = score(0.55);
+        // Raw values as the analyzer produces them: ratios against the track's own
+        // p95, so even the calm section reads as 0.6 in absolute terms.
+        s.beat_energy = (0..360)
+            .map(|i| if (40..80).contains(&i) { 0.60 } else { 0.95 })
+            .collect();
+        s
+    }
+
+    #[test]
+    fn a_quiet_passage_gets_a_calm_move() {
+        // The complaint, as a test: a human keeps time with their feet through
+        // the quiet part rather than spinning.
+        let s = dynamic_score();
+        let mut sch = sched();
+        // Bar starting at beat 40 is inside the calm section.
+        sch.plan(&s, 0.0);
+        let ctx = sch.context(&s, 40);
+
+        assert_eq!(ctx.tier, Tier::Calm, "ranked {:?}", ctx.energy);
+        let chosen = select::choose(&rows(), &ctx, 0, &mut Rng::new(1));
+        assert_eq!(chosen, 0, "should pick idle, got {}", rows()[chosen].name);
+    }
+
+    #[test]
+    fn the_ordinary_passage_is_not_treated_as_a_climax() {
+        // 89 % of this track sits at one level, so that level is *ordinary*. The
+        // dancer should not spend the whole song at full tilt just because the
+        // recording is loud in absolute terms — that was half the complaint.
+        let s = dynamic_score();
+        let mut sch = sched();
+        sch.plan(&s, 0.0);
+        let ctx = sch.context(&s, 100);
+
+        assert_eq!(ctx.tier, Tier::Steady, "ranked {:?}", ctx.energy);
+        let chosen = select::choose(&rows(), &ctx, 0, &mut Rng::new(1));
+        assert_ne!(chosen, 0, "and not the idle row either");
+    }
+
+    #[test]
+    fn a_move_is_held_for_a_phrase_rather_than_redrawn_every_bar() {
+        // Re-rolling every bar is what read as "weird against the music".
+        let s = score(0.55);
+        let mut sch = sched();
+        sch.plan(&s, 0.0);
+
+        let mut rows_seen = Vec::new();
+        for bar in 0..16 {
+            // Bars are 4 beats apart in this fixture.
+            let ctx = sch.context(&s, bar * 4);
+            rows_seen.push(sch.choose_for_phrase(&ctx));
+        }
+
+        // Sixteen bars of unchanging music should be four phrases, not sixteen.
+        let changes = rows_seen.windows(2).filter(|w| w[0] != w[1]).count();
+        assert!(changes <= 4, "{changes} changes in 16 bars: {rows_seen:?}");
+        assert_eq!(rows_seen[0], rows_seen[1], "a phrase must last past one bar");
+    }
+
+    #[test]
+    fn a_drop_cuts_the_phrase_short() {
+        // Holding must never mean ignoring the music.
+        let mut sch = sched();
+        let calm = Context { tier: Tier::Steady, energy: Some(0.5), ..Default::default() };
+        let first = sch.choose_for_phrase(&calm);
+        assert_eq!(sch.choose_for_phrase(&calm), first, "held");
+
+        let drop = Context {
+            tier: Tier::Loud,
+            energy: Some(0.95),
+            boundary: true,
+            ..Default::default()
+        };
+        let after = sch.choose_for_phrase(&drop);
+        assert_ne!(after, first, "a drop should change the move mid-phrase");
+        assert_eq!(sch.phrase_bars, 1, "and start a new phrase");
     }
 
     #[test]

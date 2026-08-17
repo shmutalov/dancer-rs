@@ -880,6 +880,25 @@ Given the segment label at the target beat and its energy:
 3. Exclude the row used in the previous bar (no immediate repeats).
 4. Weighted random from what remains; fall back to `default_row` if empty.
 
+**Energy is ranked within the track, not taken raw** (M4). `beat_energy` is RMS over
+the track's own 95th percentile, which sounds relative but destroys the axis:
+measured on a real track, the median beat scored 0.78 and the tenth percentile 0.45
+— the whole song sat in the top half. With the default sheet the high-energy row
+was in range for **90 %** of bars and the calm row for **9 %**, so the dancer spun
+through quiet passages because, as far as the numbers went, there were none.
+Selection therefore maps each value to its **rank within the track** — quietest bar
+0, median 0.5, loudest 1 — using the midpoint of tied values, so a plateau covering
+most of a track reads as *ordinary* rather than as a climax. This is an
+interpretation, so it lives in the scheduler; the score keeps the measurement.
+
+**A move is held for a phrase, not redrawn every bar** (M4). Re-rolling each bar was
+the first implementation and it does not read as dancing — a person picks something
+and does it for a few bars. Moves are held for four bars, cut short only when the
+music actually changes: a new energy tier, a drop, or a run-up. Tier changes carry
+**hysteresis**, because bare thresholds mean music sitting near a boundary flips
+band every bar and cuts every phrase to one, which is the erratic changing the
+phrase rule exists to prevent.
+
 **Step 2 needs a widening rule** (M3). A hard threshold assumes the track has
 dynamics. Measured on an analysed track sitting at 0.89 energy throughout, exactly
 one row of the default sheet fell inside the window, so the dancer repeated one move

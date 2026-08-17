@@ -333,23 +333,33 @@ mod tests {
         let mut p = locked(now);
 
         // Drive the loop as the app does, sampling every 8 ms.
-        let mut first_bounce: Option<(f64, usize)> = None;
         for tick in 0..500u64 {
-            let at = now + Duration::from_millis(tick * 8);
-            if let Some(f) = p.frame(at) {
-                if f.row == 1 && first_bounce.is_none() {
-                    first_bounce = Some((tick as f64 * 0.008, f.cell));
-                }
-            }
+            p.frame(now + Duration::from_millis(tick * 8));
         }
 
         let m = p.current_move().expect("a move should be scheduled");
+        let impact = test_rows()[m.row].impact_cell;
+
+        // The invariant, which holds for every row: the impact cell is on screen
+        // exactly at the target beat.
         assert!(
-            m.start_at < m.target_beat,
-            "move starts at {} for a beat at {}",
-            m.start_at,
+            (m.impact_at(impact) - m.target_beat).abs() < 1e-9,
+            "impact at {} for a beat at {}",
+            m.impact_at(impact),
             m.target_beat
         );
+        // Anticipation follows from it — but only for a row whose accent is not
+        // its first cell. A row with `impact_cell = 0` has nothing to wind up, so
+        // starting on the beat is correct for it.
+        if impact > 0 {
+            assert!(
+                m.start_at < m.target_beat,
+                "row {} starts at {} for a beat at {}",
+                m.row,
+                m.start_at,
+                m.target_beat
+            );
+        }
     }
 
     #[test]

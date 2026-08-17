@@ -9,6 +9,7 @@
 //! project ship without segmentation: the scheduler needs to know that energy rose
 //! at a downbeat, not that the section is called a chorus.
 
+use crate::energy::Tier;
 use crate::rng::Rng;
 
 /// What a sheet row offers the scheduler. Mirrors the manifest (spec §4.2), kept
@@ -40,10 +41,12 @@ impl RowInfo {
 pub const ENERGY_WINDOW: f32 = 0.35;
 
 /// What the music is doing at the moment being scheduled.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Context {
-    /// Normalised energy at the target beat, when anything measured it.
+    /// Energy at the target beat, **ranked within the track** (see `energy`).
     pub energy: Option<f32>,
+    /// Coarse band of the same value, for deciding whether to change move at all.
+    pub tier: Tier,
     /// Segment label, when the score has segments. Usually `None`.
     pub label: Option<String>,
     /// Energy is about to rise: this bar is a run-up (spec §11.3's `build`).
@@ -52,6 +55,19 @@ pub struct Context {
     pub boundary: bool,
     /// Row used in the previous bar, excluded to avoid immediate repeats.
     pub previous: Option<usize>,
+}
+
+impl Default for Context {
+    fn default() -> Self {
+        Self {
+            energy: None,
+            tier: Tier::Steady,
+            label: None,
+            building: false,
+            boundary: false,
+            previous: None,
+        }
+    }
 }
 
 /// Pick a row for one bar.
