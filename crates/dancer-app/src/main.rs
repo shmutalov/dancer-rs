@@ -35,6 +35,7 @@ use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 
 mod cli;
 mod config;
+mod console;
 mod events;
 mod library;
 mod playback;
@@ -52,6 +53,14 @@ use playback::Playback;
 const GRID_TICK: Duration = Duration::from_millis(8);
 
 fn main() -> anyhow::Result<()> {
+    // Before anything writes a byte. In release this is a GUI-subsystem binary
+    // with no console, so a command-line invocation has nowhere to print until
+    // one is attached — see `console`.
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    if is_command_line(&argv) {
+        console::attach();
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -64,7 +73,7 @@ fn main() -> anyhow::Result<()> {
         .with_target(false)
         .init();
 
-    let args = match cli::parse(std::env::args().skip(1)) {
+    let args = match cli::parse(argv.into_iter()) {
         Ok(a) => a,
         Err(msg) => {
             eprintln!("{msg}");
@@ -232,6 +241,33 @@ fn main() -> anyhow::Result<()> {
     event_loop.run_app(&mut app)?;
     Ok(())
 }
+
+/// Does this invocation talk to a terminal rather than open a window?
+///
+/// Deliberately a raw scan of the arguments rather than something derived from
+/// the parsed `Args`: parsing can fail, and a usage error also needs somewhere to
+/// print. Unknown flags count, for the same reason.
+fn is_command_line(argv: &[String]) -> bool {
+    argv.iter().any(|a| {
+        matches!(
+            a.as_str(),
+            "-h" | "--help" | "--scan" | "--write-config" | "--yandex-login"
+        ) || (a.starts_with('-') && !KNOWN_GUI_FLAGS.contains(&a.as_str()))
+    })
+}
+
+/// Flags that modify the dancer rather than replacing it with a command.
+const KNOWN_GUI_FLAGS: &[&str] = &[
+    "--audio",
+    "--score",
+    "--models",
+    "--no-cache",
+    "--no-anticipate",
+    "--no-smtc",
+    "--no-fetch",
+    "--rate",
+    "--stale",
+];
 
 /// `--yandex-login`: OAuth device flow, then store the token (spec §6.4.1).
 ///

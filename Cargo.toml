@@ -34,6 +34,10 @@ features = [
     "Foundation_Collections",
     "Media_Control",
     "Win32_Foundation",
+    # CreateFileW is gated behind Win32_Security, for CONOUT$.
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
     "Win32_Graphics_Gdi",
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_HiDpi",

@@ -29,6 +29,14 @@ pub struct DeviceLogin {
     pub expires_in: Option<Duration>,
 }
 
+/// How long to wait for the user before giving up.
+///
+/// Set explicitly rather than left to the library's default. This call blocks the
+/// process while it polls, so "how long can it possibly sit there" must be a number
+/// someone chose — the first version inherited an unknown default and appeared to
+/// hang forever when the user could not see the code it was waiting on.
+pub const LOGIN_TIMEOUT: Duration = Duration::from_secs(180);
+
 /// Run the device flow and return an access token.
 ///
 /// `show` is called once, as soon as the code exists, and must display it — the
@@ -43,6 +51,7 @@ pub async fn login(
 
     let options = DeviceAuthOptions {
         device_name: device_name.to_string(),
+        timeout: Some(LOGIN_TIMEOUT),
         ..Default::default()
     };
 
@@ -73,6 +82,14 @@ pub async fn login(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_login_cannot_wait_indefinitely() {
+        // Regression: an unbounded wait plus a code the user could not see read
+        // as a total hang, with no console for Ctrl+C to arrive through.
+        assert!(LOGIN_TIMEOUT <= Duration::from_secs(600));
+        assert!(LOGIN_TIMEOUT >= Duration::from_secs(60), "long enough to type a code");
+    }
 
     #[test]
     fn a_device_login_carries_what_the_user_needs_to_see() {
