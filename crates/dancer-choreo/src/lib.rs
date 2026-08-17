@@ -151,15 +151,31 @@ impl Scheduler {
     /// Idempotent per bar: calling this every frame is the intended usage.
     pub fn plan(&mut self, score: &Score, position: f64) {
         let horizon = position + LOOKAHEAD;
-        // On the first call, and after a seek, start a window *behind* the current
-        // position rather than at it. Starting exactly at `position` skips a bar
-        // beginning on this instant — which is the common case at startup, where
-        // the track begins on a downbeat — and leaves the dancer with nothing
-        // scheduled until the next bar. Reaching back also picks up a move whose
-        // anticipation began before we arrived; it plays from partway through,
-        // which is what it would have been doing anyway.
-        if self.planned_to < position {
-            self.planned_to = position - LOOKAHEAD;
+
+        // The window starts a lookahead *behind* the position, not at it. Starting
+        // exactly at `position` skips a bar beginning on this instant — the common
+        // case at startup, where a track begins on a downbeat — and leaves the
+        // dancer with nothing scheduled for its whole first bar. Reaching back also
+        // picks up a move whose anticipation began before we arrived.
+        //
+        // **`planned_to` must never move backwards.** This compared against
+        // `position` and reset to `position - LOOKAHEAD`, which drags the mark
+        // backwards every time the position drifts past it — so bars already in the
+        // queue were planned again, every frame, each with a freshly chosen random
+        // row. `frame_at` then popped the lot and the sprite changed row every
+        // 8 ms. It showed up as visual noise rather than as a wrong move.
+        //
+        // It survived because every test called `plan` at a fixed position, or at
+        // two positions far apart — never advancing frame by frame, which is the
+        // only way the mark falls behind. Tempo set the severity: with bars
+        // narrower than `LOOKAHEAD` the mark jumps ahead of the position again
+        // immediately and only one bar duplicates per bar, while at 2.48 s bars
+        // against a 2 s window it never gets ahead and re-plans on every frame.
+        // The user saw "normal, normal, weird" at 120 BPM and continuous noise at
+        // 96.8 — the same bug at two severities.
+        let earliest = position - LOOKAHEAD;
+        if self.planned_to < earliest {
+            self.planned_to = earliest;
         }
 
         for i in 0..score.beats.len() {
@@ -610,6 +626,86 @@ mod tests {
         let ctx = sch.context(&s, 12);
         assert!(ctx.building);
         assert!(!ctx.boundary);
+    }
+
+    /// A score whose bars are wider than the lookahead window.
+    ///
+    /// 96.8 BPM in four is a 2.48 s bar against a 2 s `LOOKAHEAD`. The fixtures
+    /// were all 120 BPM, whose 2.0 s bar sits exactly on the boundary — which is
+    /// why the re-planning bug survived every test until a real track hit it.
+    fn slow_score() -> Score {
+        let interval = 60.0 / 96.8;
+        let beats: Vec<f64> = (0..400).map(|i| i as f64 * interval).collect();
+        Score {
+            bpm: 96.8,
+            beat_positions: (0..400).map(|i| (i % 4 + 1) as u8).collect(),
+            downbeats: beats.iter().copied().step_by(4).collect(),
+            beat_energy: vec![0.55; beats.len()],
+            beats,
+            ..score(0.55)
+        }
+    }
+
+    #[test]
+    fn advancing_frame_by_frame_does_not_replan_bars() {
+        // The "noise" failure, as reported: rows changing many times a second
+        // instead of once a bar. Drive the scheduler exactly as the app does —
+        // plan then read, every 8 ms — and count how often the move changes.
+        let s = slow_score();
+        let mut sch = sched();
+
+        let mut changes = 0;
+        let mut last: Option<f64> = None;
+        for tick in 0..1250u32 {
+            let pos = tick as f64 * 0.008; // 10 seconds
+            sch.plan(&s, pos);
+            sch.frame_at(pos);
+            let target = sch.current().map(|m| m.target_beat);
+            if target != last {
+                changes += 1;
+                last = target;
+            }
+        }
+
+        // Ten seconds of 2.48 s bars is four moves, plus the initial one.
+        assert!(changes <= 6, "{changes} move changes in 10 s — should be one per bar");
+        // And the queue must not grow without bound while that happens.
+        assert!(sch.queued() <= 3, "queued {} moves for a 2 s window", sch.queued());
+    }
+
+    #[test]
+    fn planned_to_never_moves_backwards() {
+        // The invariant underneath the bug above, stated directly.
+        let s = slow_score();
+        let mut sch = sched();
+        let mut mark = f64::NEG_INFINITY;
+        for tick in 0..600u32 {
+            sch.plan(&s, tick as f64 * 0.01);
+            assert!(sch.planned_to >= mark, "planned_to went backwards");
+            mark = sch.planned_to;
+        }
+    }
+
+    #[test]
+    fn every_bar_is_planned_exactly_once() {
+        let s = slow_score();
+        let mut sch = sched();
+        let mut targets = Vec::new();
+        for tick in 0..1250u32 {
+            let pos = tick as f64 * 0.008;
+            sch.plan(&s, pos);
+            // Drain whatever became current, recording each distinct move.
+            sch.frame_at(pos);
+            if let Some(m) = sch.current() {
+                if targets.last() != Some(&m.target_beat) {
+                    targets.push(m.target_beat);
+                }
+            }
+        }
+        let mut sorted = targets.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        sorted.dedup();
+        assert_eq!(targets.len(), sorted.len(), "a bar was scheduled twice: {targets:?}");
     }
 
     #[test]
