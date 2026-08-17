@@ -20,7 +20,7 @@ removes something the original spec assumed was necessary.
 | Toolchain | **GNU**, pinned in `rust-toolchain.toml` | MSVC needs a ~2 GB Windows SDK for import libraries. Every surface verified on GNU instead — see §0.4 |
 | Windows 10 | **First-class, not degraded** | Large share of the install base. No feature may require a Win11-only API. Applying that rule is what removed the audio subsystem — see §4.1 |
 | Audio capture | **Cut from v1** | No WASAPI, no loopback, no recording, no `dancer-audio`. Every purpose it served either dissolved or has a cheaper answer. Costs streaming support; see §4.1 |
-| Hosted score sharing | **Rejected** | No server, no hosting. Analyse and cache locally. Streaming is permanently `Unscored`; owned music via a library index is the product — see §4.2 |
+| Hosted score sharing | **Rejected** | No server, no hosting. Analyse and cache locally. Owned music via a library index is the product — see §4.2. Streaming was `Unscored` in consequence; §5.9's reversal bought back the signed-in Yandex case only, and locally |
 | Score cache | **SQLite** (`rusqlite`, bundled), single file beside the exe | Reversed from `redb` after measuring both. redb's format broke twice in two years against data worth ~2 h of analysis to rebuild, and is opaque to every tool. The C-compiler objection measured 53 s of one-time build. See spec §5.2 |
 | Beat + downbeat tracking | **`beat-this`** (rten backend) | Rust port of the ISMIR 2024 tracker; reports verified F-measure parity with the PyTorch reference. Emits beats, downbeats and beat numbers — maps 1:1 onto the score format |
 | ML runtime | **`rten`**, with `ort` as cross-check | Ships inside `beat-this`. Do not add a second framework |
@@ -28,8 +28,8 @@ removes something the original spec assumed was necessary.
 | Source separation (Demucs) | **Not used** | Rust ports exist (`demucs-rs`, `charon-audio`), but a per-track stem separation pass is a large cost for section *names* |
 | Functional segmentation | **Deferred to M6** | No trustworthy Rust option. `oximedia-mir` advertises it but its breadth-to-adoption ratio does not survive scrutiny. Derive boundaries from novelty + RMS instead |
 | Python `allin1` sidecar | **Optional, off the critical path** | Was the primary analysis path in spec §8.1. Now an M6 enrichment supplying segment labels only |
-| Yandex integration | **`yandex-music`** (vyfor) as an ID resolver | Mature: 0.7.0, ~15K downloads, maintained since June 2024. REST-only, so it cannot serve as a `Source` — see §5.8 |
-| Yandex realtime (`yamuse`) | **Chosen 2026-08-15** | Replaces `yandex-music`. Justified not by ynison's precision but by Phase 0.5: Yandex Browser publishes nothing to SMTC, so without it the dancer cannot tell a track is playing at all. Still young — feature-flag it. See §5.8 |
+| Yandex integration | ~~**`yandex-music`** (vyfor) as an ID resolver~~ | Superseded twice. REST-only, so it cannot serve as a `Source`; it remains the fallback for the resolver role, which is still unbuilt — see §5.8 |
+| Yandex realtime (`yamuse`) | **Chosen 2026-08-15, shipped M4 for a different reason** | Chosen for ynison presence; ynison is **unused**. What it actually provides is catalogue search, download-info and the OAuth device flow behind the fetch-analyse-delete path (§5.9, spec §6.4.1). Identity and position come from SMTC. Still young — feature-flagged. See §5.8 |
 
 ### 1.1 What these decisions delete
 
@@ -235,9 +235,9 @@ M4's value is real.
 | **M1** | Local file source + BeatClock — **done 2026-08-15** | Hand-written score JSON drives a beat-locked dance against a local WAV; no visible drift over 3 min |
 | **M2** | Real analyzer + score cache — **done 2026-08-15** | `beat-this` produces a score from a local file, cached to disk, indistinguishable in use from the hand-written one |
 | **M3** | **Anticipation scheduler** — built 2026-08-15, **A/B not yet judged** | `impact_cell` respected; A/B against M1 shows a difference visible to someone not told what changed |
-| **M4** | SMTC source — **done 2026-08-15** | Identity, position and pause/resume from Spotify desktop; correct freeze and resume-on-downbeat |
+| **M4** | SMTC source, tag reading, library scanner, **Yandex fetcher** — **done 2026-08-17** | Identity, position and pause/resume from a desktop player; correct freeze and resume-on-downbeat. Grew past its brief: §5.9's reversal pulled the Yandex fetch-analyse-delete path in two milestones early |
 | **M5** | Tray UI, config, packaging | Installable by a stranger |
-| **M6** | *Optional:* segment labels, Spotify, Yandex resolver | Only if M5 shows unlabelled pools are the visible gap |
+| **M6** | *Optional:* segment labels, Spotify, Yandex canonical IDs | Only if M5 shows unlabelled pools are the visible gap. The Yandex **fetcher** landed in M4; the **resolver** is what is left — see §5.8 |
 
 Two milestones were cut, not renamed. The old M5 (WASAPI loopback) and M6
 (learn-on-second-listen) are gone with the audio subsystem — see §4.1.
@@ -287,11 +287,20 @@ The mechanism is a two-step: analysis keys grids by file, and SMTC reports
 back to an analysed file (spec §5.1, §6.2). M4 is where those meet, and the
 normalisation is the fragile part worth testing hard.
 
-**Streaming is `Unscored` and stays that way.** Spotify and Yandex give identity,
-position and pause/resume, so the dancer tracks play state correctly — it just has
-no grid, and runs a fixed-fps loop. Three routes to a grid were each considered and
-each rejected on their merits: recording (§4.1), a hosted score cache (§6.4), and
-track downloads (§5.9). Nothing is pending; this is the answer.
+**Streaming is `Unscored` by default, and that is still the shape of the product.**
+Spotify and Yandex give identity, position and pause/resume, so the dancer tracks
+play state correctly — it just has no grid, and runs a fixed-fps loop.
+
+Three routes to a grid were considered. Two were rejected and stay rejected:
+recording (§4.1) and a hosted score cache (§6.4). **The third was reversed by the
+owner on 2026-08-15** — a signed-in Yandex user can have a track fetched, analysed
+and deleted (§5.9, spec §6.4.1). That route is deliberately narrow: one service, off
+until both a token and `fetch_for_analysis` say otherwise, one track at a time,
+never a library sweep, and the audio is gone before the score is written.
+
+So the honest statement is two-part. **Owned music is the product.** Streaming syncs
+only for a Yandex user who signs in and asks; everyone else gets correct play-state
+tracking and a fixed-fps loop.
 
 Say so in the UI. A user whose Spotify does not sync should learn that it is a
 decision, not a failure.
@@ -631,8 +640,11 @@ Ordered by expected value, none on the critical path.
    newline-delimited JSON over stdio, supplying `segments` and `cues` on top of a
    grid we already have. NATTEN remains a Windows barrier, but now for an optional
    feature rather than the product.
-2. **Yandex track ID resolver.** `yandex-music` (vyfor) as a `TrackIdResolver`,
-   *not* a `Source` — see §5.8 below.
+2. **Yandex canonical track IDs.** A `TrackIdResolver`, *not* a `Source` — see §5.8.
+   The Yandex **fetcher** shipped early, in M4; this is the other half, and the two
+   are independent. Buys cache keys that cannot collide, replacing the hashed
+   `(title, artist)`. `yamuse` already carries catalogue search, so the dependency
+   is paid for; `yandex-music` (vyfor) remains the fallback.
 3. **Spotify adapter.** `rspotify` OAuth PKCE. Buys canonical IDs and coverage when
    playback is on another device where SMTC sees nothing. Costs an auth flow.
 
@@ -640,7 +652,7 @@ Ordered by expected value, none on the critical path.
 
 ## 5. Notes on specific decisions
 
-### 5.8 Why Yandex is a resolver, not a source
+### 5.8 Yandex: resolver, source, or fetcher
 
 `yandex-music` exposes 13 REST submodules — `queue`, `rotor`, `track`, `playlist`
 and others — with no websocket or ynison module. Its `queue` returns queue
@@ -716,6 +728,30 @@ then strong (presence), then weak again (presence, but only in the browser). The
 decision was never wrong to defer; it was right to keep it feature-flagged and
 unbuilt until M6, which is exactly why this costs nothing to revise.
 
+#### Settled in M4: none of the above. It is a fetcher.
+
+Yandex shipped two milestones early, pulled in by §5.9's reversal rather than by
+anything argued in this section. What was built uses `yamuse` for **catalogue
+search, download-info and the OAuth device flow** — the machinery needed to fetch a
+track, analyse it and delete it. It is **not** a `Source`: identity and position
+come from SMTC, and ynison, the one feature that decided the crate choice, is
+unused.
+
+It is **not** the resolver either, and that is a design decision rather than an
+omission. Streamed scores are keyed on a hash of the reported `(title, artist)`, not
+on a Yandex catalogue ID, because the ID is not known until *after* a search — and
+the cache exists precisely to avoid searching twice for the same song. Keying on the
+ID would mean a network round trip to discover the key of an entry already held.
+
+So the table above is still right about what a resolver would buy: hashed
+`(title, artist)` will collide eventually, and a canonical ID is the fix. It is
+simply independent of the fetch, and it is all that is left of Yandex in M6.
+
+The reasoning here has now swung three times — precision, presence,
+presence-only-in-the-browser — and the thing that finally justified the dependency
+was none of them. Worth remembering the next time a crate is chosen for a capability
+before that capability has a user.
+
 ### 5.9 A capability to fence off
 
 `yamuse` advertised lossless downloads, and other Yandex wrappers expose similar
@@ -731,9 +767,9 @@ playing on the user's own machine, off by default and disclosed; this is retriev
 masters from a CDN. Losing the weaker option does not upgrade the stronger one.
 
 So the guard matters more than before: keep `dancer-source` structurally unable to
-reach download endpoints, rather than relying on nobody reaching for them. The
-there is no sanctioned alternative: streamed tracks stay `Unscored`. That is the
-decision, not a gap awaiting a workaround.
+reach download endpoints, rather than relying on nobody reaching for them. There is
+no sanctioned alternative: streamed tracks stay `Unscored`. That is the decision,
+not a gap awaiting a workaround.
 
 #### Reversed 2026-08-15 — see spec §6.4.1
 
@@ -770,10 +806,13 @@ Carried forward, with the resolved ones struck.
 4. ~~Should scores be shareable via a hosted cache?~~ **Resolved: no.** Everything
    analysed and cached locally. No server, no hosting, no fetch/upload paths. The
    cache is one file, so copying it to a friend happens to work — a consequence of
-   the storage choice, not a feature. Streamed tracks stay `Unscored` (§4.2).
+   the storage choice, not a feature. Streamed tracks stay `Unscored` unless the
+   user signs in to Yandex and asks for a fetch (§5.9) — which is computed locally
+   and shared with nobody, so it does not reopen this. See §4.2.
 5. **New:** Rust edition and MSRV. See §0.3.
-6. ~~Does Yandex need ynison push-position?~~ **Resolved: `yamuse` chosen**, then
-   substantially undercut on 2026-08-15 when the Yandex Music desktop app turned out
-   to publish to SMTC normally. Streaming is permanently `Unscored`, so precise
-   position buys nothing visible, and presence is now only missing in the *browser*.
-   The live question at M6 is whether to build the Yandex adapter at all. See §5.8.
+6. ~~Does Yandex need ynison push-position?~~ **Resolved twice, and not as asked.**
+   `yamuse` was chosen for ynison, then substantially undercut on 2026-08-15 when the
+   Yandex Music desktop app turned out to publish to SMTC normally. It shipped in M4
+   regardless, for an unrelated reason: catalogue search and download-info behind
+   §5.9. **ynison remains unused**, and the adapter exists — so the live question is
+   only whether push-position would ever be worth switching on. See §5.8.
