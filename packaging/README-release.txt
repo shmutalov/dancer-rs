@@ -141,6 +141,10 @@ If the dancer stops following your music, that file will say whether it lost the
 track, could not find a beat grid for it, or is following a different app's media
 session. Set RUST_LOG=dancer_rs=debug for more detail.
 
+It records the titles and artists of what you played -- that is precisely what
+makes a recognition problem diagnosable -- so have a skim before sharing it. Your
+Yandex token is never written there, and neither is your account name.
+
 
 Controls
 --------

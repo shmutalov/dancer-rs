@@ -1085,7 +1085,11 @@ impl App {
         while let Ok(ev) = self.account_ch.rx.try_recv() {
             match ev {
                 account::AccountEvent::Valid { login } => {
-                    tracing::info!(login, "yandex token ok");
+                    // The login is deliberately not logged. The tray shows it, so
+                    // it is not a secret — but the log file exists to be pasted
+                    // into a bug report, and an account name is not something
+                    // anyone needs in order to read one.
+                    tracing::info!("yandex token ok");
                     self.account = account::Status::Ok(login);
                 }
                 account::AccountEvent::Unknown(why) => {
