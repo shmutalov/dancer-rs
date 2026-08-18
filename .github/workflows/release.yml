@@ -25,6 +25,12 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # The runner's rustup is newer than the author's and rejects a target tuple in a
+  # rust-toolchain.toml `channel` -- but it still accepts one as an environment
+  # override, which also takes precedence over the file. So CI gets the same GNU
+  # host toolchain the pin asks for, by the one route both versions agree on, and
+  # `cargo build` keeps writing to target/release where the packaging script looks.
+  RUSTUP_TOOLCHAIN: stable-x86_64-pc-windows-gnu
 
 jobs:
   package:
@@ -32,7 +38,7 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.tag || github.ref }}
 
@@ -59,8 +65,9 @@ jobs:
       - name: Install the pinned toolchain
         shell: pwsh
         run: |
-          rustup show active-toolchain
+          rustup toolchain install $env:RUSTUP_TOOLCHAIN --profile minimal --component clippy
           rustc --version
+          cargo --version
 
       - name: Put MinGW gcc on PATH
         shell: pwsh
@@ -75,7 +82,7 @@ jobs:
           Add-Content -Path $env:GITHUB_PATH -Value $found -Encoding utf8
 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index
@@ -89,7 +96,7 @@ jobs:
       # and a fresh download are interchangeable -- a corrupt or swapped file fails
       # the checksum either way.
       - name: Cache the ONNX weights
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: models
           key: models-${{ hashFiles('packaging/build-release.ps1') }}
