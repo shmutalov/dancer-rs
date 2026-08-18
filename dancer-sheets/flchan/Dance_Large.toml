@@ -19,6 +19,10 @@
 cell_width = 220
 cell_height = 256
 default_row = "Waiting"
+# Waiting is seven identical cells and one that differs by three pixels — correct as
+# a resting pose mid-song, and indistinguishable from a still image when it is the
+# only thing on screen. Stepping is the smallest row that visibly loops.
+idle_row = "Stepping"
 
 # Breathing, essentially. Measured: every cell identical bar a one-pixel dip at
 # cell 3 — the whole row spans 3 px of movement. Four beats per loop because

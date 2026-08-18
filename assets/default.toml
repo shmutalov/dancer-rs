@@ -6,6 +6,8 @@
 cell_width = 110
 cell_height = 128
 default_row = "idle"
+# No `idle_row`: this sheet's idle already bobs about 4 px per loop, which reads as
+# alive on its own. Sheets whose resting pose is a still image should set one.
 
 [[row]]
 name = "idle"

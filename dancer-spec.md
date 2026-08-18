@@ -900,7 +900,7 @@ playback, 250 ms for browsers.
 
 | State | Meaning | Animation behaviour |
 |---|---|---|
-| `Idle` | Nothing playing | Default row, slow fixed fps, or hidden |
+| `Idle` | Nothing playing | **`idle_row`** at `idle_bpm`, or hidden |
 | `Identifying` | Track known, score lookup in flight | Idle row, tempo-agnostic |
 | `Unscored` | Playing, no usable score | Default row at a fixed fps. No tempo guess — FAOSDance behaviour, honestly labelled |
 | `Locked` | Score loaded, clock confident | Full predictive scheduling |
@@ -1167,6 +1167,9 @@ artwork_dir = "C:\\Users\\me\\Documents\\dancer\\artwork"
 scale = 1.0
 mirror = false
 opacity = 1.0
+# Row looped when there is no grid. Defaults to `default_row`, which is wrong for
+# a sheet whose resting pose is a still image — see §10.
+idle_row = "Stepping"
 
 [window]
 always_on_top = true

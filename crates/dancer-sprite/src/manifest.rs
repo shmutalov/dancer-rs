@@ -24,6 +24,16 @@ pub struct SheetSection {
     pub cell_width: Option<u32>,
     pub cell_height: Option<u32>,
     pub default_row: Option<String>,
+    /// Row looped when there is no beat grid to follow — nothing playing, or
+    /// playing but `Unscored` (spec §10).
+    ///
+    /// Defaults to `default_row`, which is right for a sheet whose resting pose
+    /// already moves. It is a separate setting because those are different jobs: a
+    /// good `default_row` is a neutral pose to fall back to mid-song, and a good
+    /// `idle_row` is something that visibly loops. FL Chan's `Waiting` is the case
+    /// that forces the distinction — seven identical cells and one that differs by
+    /// three pixels, which reads as a still image.
+    pub idle_row: Option<String>,
     /// Not in the original spec sketch; lets a sheet opt out of the 8-cell
     /// constraint without breaking the default (spec §17.3).
     pub cells_per_row: Option<u32>,

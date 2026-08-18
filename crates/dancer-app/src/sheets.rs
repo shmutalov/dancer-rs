@@ -62,6 +62,38 @@ pub fn ownership_warning(source: &Source) -> String {
     w
 }
 
+/// The "How to add dancers" text.
+///
+/// Built by pushing rather than as one long literal, and that is not a style
+/// preference. A `\` line continuation in a Rust string keeps the *following*
+/// line's indentation unless that line is flush left, so a paragraph laid out to
+/// look tidy in source renders with a twenty-space gap in the middle of a sentence.
+/// It compiles, it passes every other test, and the first sign of trouble is a
+/// screenshot of the dialog. Pushing whole lines cannot do that, and living here
+/// rather than in `main` means the guard test can read it.
+pub fn help_text(artwork_dir: &Path) -> String {
+    let mut t = String::new();
+    t.push_str("A dancer is a sprite sheet: one PNG that is 8 cells wide, with one row ");
+    t.push_str("per animation, plus a .txt naming those rows one per line.\n\n");
+    t.push_str("The format comes from FAOSDance and Fruity Dance, so sheets made for ");
+    t.push_str("either will work here.\n\n");
+    t.push_str("To add one:\n\n");
+    t.push_str("1. Put the .png and its .txt in:\n");
+    t.push_str(&artwork_dir.display().to_string());
+    t.push_str("\n\n2. Pick it from the tray, under Dancer.\n\n");
+    t.push_str("For it to dance in time rather than just loop, add a .toml beside the ");
+    t.push_str("PNG saying which cell is each move's accent. See default.toml in that ");
+    t.push_str("folder for a worked example, and check your work with:\n\n");
+    t.push_str("dancer-rs.exe <sheet.png> --check-sheet\n\n");
+    t.push_str("----\n\n");
+    t.push_str("Sprite sheets are other people's work. Neither dancer-rs nor you own ");
+    t.push_str("the artwork on the pages linked in that menu — it belongs to whoever ");
+    t.push_str("made it, published on their terms. Nothing is bundled or redistributed ");
+    t.push_str("here, and please do not pass sheets on with copies of this app. The ");
+    t.push_str("only artwork shipped with it is the plain default sheet.");
+    t
+}
+
 /// Every sheet in `dir`, sorted by name.
 ///
 /// A sheet is a `.png`, and nothing further is checked here. The alternative —
@@ -120,11 +152,18 @@ mod tests {
         // compiles, still passes every other test, and renders in a dialog with a
         // twenty-space gap in the middle of a sentence. Only reading it catches it —
         // so this reads it.
+        let help = help_text(Path::new("C:/app/assets"));
+        let mut texts: Vec<String> = vec![help];
         for s in SOURCES {
-            for text in [s.name, s.owner, &ownership_warning(s)] {
+            texts.push(s.name.to_string());
+            texts.push(s.owner.to_string());
+            texts.push(ownership_warning(s));
+        }
+        for text in &texts {
+            for line in text.lines() {
                 assert!(
-                    !text.contains("  "),
-                    "run of spaces in a user-facing string: {text:?}"
+                    !line.trim_start().contains("  "),
+                    "run of spaces mid-line: {line:?}"
                 );
             }
         }

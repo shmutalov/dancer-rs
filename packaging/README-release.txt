@@ -86,6 +86,18 @@ Drop it in assets\ and pick it from the tray, under Dancer. Or set it by hand:
     [sprite]
     sheet = "mysheet.png"
 
+When nothing is playing the dancer loops one row at a resting tempo. Which row
+and how fast are both settings:
+
+    [sprite]
+    idle_row = "Stepping"    # defaults to default_row
+
+    [playback]
+    idle_bpm = 75.0          # 60-90 reads as calm
+
+Worth setting idle_row if your sheet's resting pose barely moves — FL-Chan's
+"Waiting" is seven identical frames, so it looks like a still image.
+
 A .toml sidecar next to the PNG unlocks the choreography — which cell is the
 accent, how many beats a loop takes, and what kind of movement each row is. See
 assets\default.toml for a worked example, and check your work with:

@@ -96,6 +96,16 @@ pub struct Playback {
     pub offset_secs: f64,
     /// How often to ask the source where it is.
     pub poll_secs: f64,
+    /// Resting tempo for the idle loop, in beats per minute (spec §10).
+    ///
+    /// **Not a frame rate**, which is what this replaced and why it was wrong. A row
+    /// declares how many beats a pass through it occupies, so a fixed 12 fps played
+    /// FL Chan's two-beat `Stepping` row in 0.67 s — 180 BPM, and it read as
+    /// frantic. The honest control is the tempo the dancer is imagining when there
+    /// is no music to follow.
+    ///
+    /// 75 is a resting pulse and the middle of the 60–90 range that reads as calm.
+    pub idle_bpm: f64,
     /// Poll cadence for SMTC, which bounds how late a track change is noticed.
     ///
     /// Faster than `poll_secs` because a stale reading costs nothing here — every
@@ -110,6 +120,15 @@ impl Playback {
         0.180
     }
 
+    /// Seconds per cell for a row of `cells` cells spanning `beats` beats.
+    pub fn idle_frame_interval(&self, beats: u32, cells: usize) -> std::time::Duration {
+        // Clamped rather than trusted: this comes from a hand-edited file, and a
+        // zero would divide the loop into an infinitely fast one.
+        let bpm = self.idle_bpm.clamp(20.0, 240.0);
+        let secs = 60.0 / bpm * beats.max(1) as f64 / cells.max(1) as f64;
+        std::time::Duration::from_secs_f64(secs)
+    }
+
     pub fn smtc_poll_interval(&self) -> std::time::Duration {
         std::time::Duration::from_secs_f64(self.smtc_poll_secs.clamp(0.05, 10.0))
     }
@@ -122,6 +141,7 @@ impl Default for Playback {
             // tray nudges this live (spec §9.2).
             offset_secs: Self::default_offset(),
             poll_secs: 2.0,
+            idle_bpm: 75.0,
             smtc_poll_secs: 0.5,
         }
     }
@@ -136,8 +156,7 @@ pub struct Sprite {
     pub scale: f32,
     pub mirror: bool,
     pub opacity: f32,
-    /// Fixed playback rate until the clock lands in M1.
-    pub fps: u32,
+
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -172,7 +191,6 @@ impl Default for Sprite {
             scale: 1.0,
             mirror: false,
             opacity: 1.0,
-            fps: 12,
         }
     }
 }
@@ -262,5 +280,53 @@ fn is_writable(dir: &Path) -> bool {
             true
         }
         Err(_) => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_idle_loop_runs_at_the_configured_tempo() {
+        // The bug this replaced: a fixed 12 fps played FL Chan's two-beat `Stepping`
+        // row in 0.67 s, which is 180 BPM and reads as frantic. The row's own
+        // `beats_per_loop` has to be part of the sum.
+        let p = Playback::default();
+        assert_eq!(p.idle_bpm, 75.0);
+
+        // Two beats at 75 BPM is 1.6 s, over eight cells.
+        let step = p.idle_frame_interval(2, 8);
+        assert!((step.as_secs_f64() - 0.2).abs() < 1e-9, "{step:?}");
+
+        // And a four-beat resting pose dwells twice as long per cell at the same
+        // tempo, rather than being played at the same speed as a two-beat step.
+        let rest = p.idle_frame_interval(4, 8);
+        assert!((rest.as_secs_f64() - step.as_secs_f64() * 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_default_tempo_is_a_resting_pulse() {
+        // The brief was 60-90: fast enough to look alive, slow enough that a dancer
+        // with no music to follow is not visibly hurrying.
+        let bpm = Playback::default().idle_bpm;
+        assert!((60.0..=90.0).contains(&bpm), "{bpm}");
+    }
+
+    #[test]
+    fn a_nonsense_tempo_cannot_divide_by_zero() {
+        // Hand-edited file: zero and negative are both reachable, and both would
+        // otherwise produce an infinitely fast loop.
+        for bad in [0.0, -5.0, f64::INFINITY, 1e9] {
+            let p = Playback { idle_bpm: bad, ..Playback::default() };
+            let d = p.idle_frame_interval(2, 8);
+            assert!(d.as_secs_f64() > 0.0 && d.as_secs_f64() < 10.0, "{bad} gave {d:?}");
+        }
+    }
+
+    #[test]
+    fn a_sheet_reporting_no_cells_does_not_panic() {
+        let p = Playback::default();
+        assert!(p.idle_frame_interval(0, 0).as_secs_f64() > 0.0);
     }
 }

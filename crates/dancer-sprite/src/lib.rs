@@ -88,6 +88,8 @@ pub struct Sheet {
     pub rows: Arc<[Row]>,
     /// Index into `rows` used when nothing else is scheduled.
     pub default_row: usize,
+    /// Row looped at a fixed rate when there is no grid (spec §4.2's `idle_row`).
+    pub idle_row: usize,
     /// Index of the row played while dragging, if the sheet has one.
     pub held_row: Option<usize>,
 }
@@ -208,6 +210,15 @@ impl Sheet {
             .or_else(|| (0..rows.len()).find(|i| Some(*i) != held_row))
             .unwrap_or(0);
 
+        // Falls back to `default_row` rather than to a guess: a sheet that says
+        // nothing about idling is best served by the pose it already nominated.
+        let idle_row = manifest
+            .as_ref()
+            .and_then(|m| m.sheet.idle_row.as_deref())
+            .and_then(|want| rows.iter().position(|r| r.name == want))
+            .filter(|i| Some(*i) != held_row)
+            .unwrap_or(default_row);
+
         tracing::info!(
             sheet = %png.display(),
             cell_width,
@@ -215,6 +226,7 @@ impl Sheet {
             rows = rows.len(),
             cells_per_row,
             default = %rows[default_row].name,
+            idle = %rows[idle_row].name,
             "loaded sheet"
         );
 
@@ -223,6 +235,7 @@ impl Sheet {
             cell_height,
             rows: rows.into(),
             default_row,
+            idle_row,
             held_row,
         })
     }

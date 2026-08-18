@@ -731,7 +731,12 @@ struct App {
 
 impl App {
     fn frame_interval(&self) -> Duration {
-        Duration::from_secs_f64(1.0 / self.cfg.sprite.fps.max(1) as f64)
+        // Derived from the *row*, not from a frame rate. `beats_per_loop` says what
+        // a pass through this row is worth musically, so the same idle tempo gives a
+        // four-beat resting pose twice the dwell of a two-beat step (spec §4.2).
+        self.cfg
+            .playback
+            .idle_frame_interval(self.beats_per_loop(), self.sheet.cells_per_row())
     }
 
     fn surface_size(&self) -> (u32, u32) {
@@ -946,7 +951,7 @@ impl App {
         tracing::info!(
             offset_ms = self.cfg.playback.offset_secs * 1000.0,
             scale = self.cfg.sprite.scale,
-            fps = self.cfg.sprite.fps,
+            idle_bpm = self.cfg.playback.idle_bpm,
             "config reloaded"
         );
 
@@ -1071,34 +1076,8 @@ impl App {
 
     /// Explain where dancers come from, on a worker thread so the dancer keeps going.
     fn show_sheet_help(&self) {
-        let dir = self.artwork_dir();
-        std::thread::spawn(move || {
-            let mut t = String::new();
-            t.push_str(
-                "A dancer is a sprite sheet: one PNG that is 8 cells wide, with one row                  per animation, plus a .txt naming those rows one per line.
-
-                 The format comes from FAOSDance and Fruity Dance, so sheets made for                  either will work here.
-
-                 To add one:
-
-                   1. Put the .png and its .txt in
-       ",
-            );
-            t.push_str(&dir.display().to_string());
-            t.push_str(
-                "
-  2. Pick it from the tray, under Dancer.
-
-                 For it to dance in time rather than just loop, add a .toml beside the                  PNG saying which cell is each move's accent. See default.toml in that                  folder for a worked example, and check your work with:
-
-                        dancer-rs.exe <sheet.png> --check-sheet
-
-                 ---
-
-                 Sprite sheets are other people's work. Neither dancer-rs nor you own                  the artwork on the pages linked in that menu — it belongs to whoever                  made it, published on their terms. Nothing is bundled or                  redistributed here, and please do not pass sheets on with copies of                  this app. The only artwork shipped with it is the plain default sheet.",
-            );
-            dialog::info("Adding dancers", &t);
-        });
+        let text = sheets::help_text(&self.artwork_dir());
+        std::thread::spawn(move || dialog::info("Adding dancers", &text));
     }
 
     /// Fold in whatever the Yandex worker learned.
@@ -1372,6 +1351,18 @@ impl App {
         }
 
         if now >= self.next_frame {
+            // No grid to follow: loop the idle row at a fixed rate. This is spec
+            // §10's `Unscored` — FAOSDance behaviour, honest about knowing no tempo
+            // — and it is also what runs when nothing is playing at all.
+            //
+            // The row matters. Falling back to `default_row` looked like a bug on FL
+            // Chan, whose `Waiting` pose is seven identical cells and one that
+            // differs by three pixels: the loop was running the whole time and
+            // rendering what appeared to be a single frame.
+            if self.drag.is_none() && self.row != self.sheet.idle_row {
+                self.row = self.sheet.idle_row;
+                self.cell = 0;
+            }
             self.cell = (self.cell + 1) % cells;
             self.draw();
             // Advance from the scheduled time, not from now, so the loop does not
@@ -1481,7 +1472,7 @@ impl ApplicationHandler for App {
         tracing::info!(
             w, h,
             pos = ?self.pos,
-            fps = self.cfg.sprite.fps,
+            idle_bpm = self.cfg.playback.idle_bpm,
             offset_secs = self.cfg.playback.offset_secs,
             anticipate = self.playback.anticipating(),
             beats_per_loop = self.beats_per_loop(),
