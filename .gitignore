@@ -14,9 +14,14 @@ dancer-sheets/**
 !dancer-sheets/**/
 !dancer-sheets/**/*.toml
 
-# ONNX weights, ~10 MB, fetched rather than vendored (spec §8.1).
+# ONNX weights, ~10 MB, fetched rather than vendored (spec §8.1). `models/` at the
+# root is the packaging script's fetch cache; the checksums that pin them live in
+# packaging/build-release.ps1.
 models/
 *.onnx
+
+# Release packages, assembled by packaging/build-release.ps1.
+dist/
 
 # The score cache is user data, generated on their machine (spec §5.1).
 *.db
