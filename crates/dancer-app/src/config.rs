@@ -77,6 +77,11 @@ pub struct Playback {
 }
 
 impl Playback {
+    /// Spec §9.2's local-playback default, and what `Reset offset` returns to.
+    pub fn default_offset() -> f64 {
+        0.180
+    }
+
     pub fn smtc_poll_interval(&self) -> std::time::Duration {
         std::time::Duration::from_secs_f64(self.smtc_poll_secs.clamp(0.05, 10.0))
     }
@@ -85,9 +90,9 @@ impl Playback {
 impl Default for Playback {
     fn default() -> Self {
         Self {
-            // Spec §9.2's local-playback default. Browsers want ~250 ms; per-source
-            // values arrive with the tray UI in M5.
-            offset_secs: 0.180,
+            // Browsers want ~250 ms; per-source values are still future work. The
+            // tray nudges this live (spec §9.2).
+            offset_secs: Self::default_offset(),
             poll_secs: 2.0,
             smtc_poll_secs: 0.5,
         }

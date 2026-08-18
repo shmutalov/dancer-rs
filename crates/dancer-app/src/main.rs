@@ -39,6 +39,7 @@ mod console;
 mod events;
 mod library;
 mod playback;
+mod tray;
 
 /// The score cache, beside the executable (spec §5.1, §13).
 const SCORE_DB: &str = "scores.db";
@@ -241,6 +242,8 @@ fn main() -> anyhow::Result<()> {
         drag: None,
         row_before_drag: None,
         next_frame: Instant::now(),
+        tray: None,
+        tray_shown: None,
     };
     event_loop.run_app(&mut app)?;
     Ok(())
@@ -658,6 +661,11 @@ struct App {
     drag: Option<(i32, i32)>,
     row_before_drag: Option<usize>,
     next_frame: Instant,
+    /// `None` until `resumed`, and `None` for good if the shell refused it. A
+    /// missing tray is a degraded UI, never a reason not to dance.
+    tray: Option<tray::Tray>,
+    /// What the tray menu was last told, so it is only rewritten on change.
+    tray_shown: Option<(String, Option<String>, bool, bool, bool, i64)>,
 }
 
 impl App {
@@ -703,6 +711,155 @@ impl App {
     ///
     /// Stored normalised so the position survives a resolution or DPI change
     /// rather than putting the dancer off-screen (spec §12).
+    /// Build the tray, using the sheet's own artwork as the icon.
+    ///
+    /// A failure here is logged and dropped. The shell can refuse a tray icon —
+    /// explorer restarting, a locked-down session — and none of that is a reason to
+    /// stop dancing. Right-click on the sprite remains the fallback exit.
+    fn build_tray(&mut self) {
+        if self.tray.is_some() {
+            return;
+        }
+        // The default row's first cell: the pose the sheet author chose as its
+        // resting state, which is the one that reads as "this sheet".
+        let cell = self
+            .sheet
+            .rows
+            .get(self.sheet.default_row)
+            .and_then(|r| r.cells.first())
+            .cloned();
+        let Some(cell) = cell else {
+            tracing::warn!("sheet has no cells; skipping the tray icon");
+            return;
+        };
+
+        match tray::Tray::new(
+            &cell,
+            self.sheet.cell_width,
+            self.sheet.cell_height,
+            self.cfg.window.click_through,
+            self.cfg.window.always_on_top,
+            self.playback.anticipating(),
+            self.cfg.playback.offset_secs,
+        ) {
+            Ok(t) => {
+                tracing::info!("tray ready");
+                self.tray = Some(t);
+            }
+            Err(e) => tracing::warn!(error = %e, "no tray icon; right-click the sprite to quit"),
+        }
+    }
+
+    /// Apply whatever the tray menu was clicked for, then refresh what it shows.
+    fn drain_tray(&mut self, el: &ActiveEventLoop) {
+        let Some(tray) = self.tray.as_ref() else {
+            return;
+        };
+        for action in tray.poll() {
+            tracing::info!(?action, "tray");
+            match action {
+                tray::Action::ToggleClickThrough => {
+                    self.cfg.window.click_through = !self.cfg.window.click_through;
+                    if let Some(hwnd) = self.hwnd {
+                        apply_window_styles(hwnd, self.cfg.window.click_through);
+                    }
+                    // With the mouse passing through, the sprite cannot be clicked
+                    // at all — the tray is now the only way back, which is exactly
+                    // why this option was unusable before there was one.
+                    if self.cfg.window.click_through {
+                        tracing::info!("click-through on; use the tray to turn it off");
+                    }
+                }
+                tray::Action::ToggleAlwaysOnTop => {
+                    self.cfg.window.always_on_top = !self.cfg.window.always_on_top;
+                    if let Some(w) = self.window.as_ref() {
+                        w.set_window_level(if self.cfg.window.always_on_top {
+                            WindowLevel::AlwaysOnTop
+                        } else {
+                            WindowLevel::Normal
+                        });
+                    }
+                }
+                tray::Action::ToggleAnticipation => {
+                    self.playback.toggle_anticipation();
+                }
+                tray::Action::NudgeOffset(by) => self.set_offset(self.cfg.playback.offset_secs + by),
+                tray::Action::ResetOffset => self.set_offset(config::Playback::default_offset()),
+                tray::Action::OpenDataDir => tray::open_dir(&self.dir),
+                tray::Action::Quit => {
+                    self.quit(el);
+                    return;
+                }
+            }
+        }
+        self.refresh_tray();
+    }
+
+    /// Move the output-latency offset (spec §9.2) and persist it.
+    ///
+    /// Written through immediately rather than on exit: this is dialled in by eye
+    /// against playing music, and losing the value to a crash — or to the process
+    /// being killed, which is how a tray app usually dies — would mean doing it
+    /// again.
+    fn set_offset(&mut self, secs: f64) {
+        // A full second either way is far past any real output latency, and a
+        // runaway value would put the dancer on a different beat entirely.
+        let secs = (secs * 1000.0).round() / 1000.0;
+        let secs = secs.clamp(-1.0, 1.0);
+        self.cfg.playback.offset_secs = secs;
+        self.playback.clock.set_offset(secs);
+        tracing::info!(offset_ms = secs * 1000.0, "offset");
+        if let Err(e) = self.cfg.save(&self.dir) {
+            tracing::warn!(error = %e, "could not save the offset");
+        }
+    }
+
+    /// Push current state into the tray menu, if anything it shows has changed.
+    fn refresh_tray(&mut self) {
+        let Some(tray) = self.tray.as_ref() else {
+            return;
+        };
+        let track = self.playback.track.as_ref().map(|t| {
+            if t.artist.is_empty() {
+                t.title.clone()
+            } else {
+                format!("{} — {}", t.artist, t.title)
+            }
+        });
+        // Compared before writing because `set_text` crosses into the shell, and a
+        // menu rewritten every 8 ms is both wasteful and capable of flickering an
+        // open menu.
+        let now = (
+            self.playback.state.name().to_string(),
+            track,
+            self.cfg.window.click_through,
+            self.cfg.window.always_on_top,
+            self.playback.anticipating(),
+            (self.cfg.playback.offset_secs * 1000.0).round() as i64,
+        );
+        if self.tray_shown.as_ref() == Some(&now) {
+            return;
+        }
+        tray.refresh(
+            &now.0,
+            now.1.as_deref(),
+            now.2,
+            now.3,
+            now.4,
+            self.cfg.playback.offset_secs,
+        );
+        self.tray_shown = Some(now);
+    }
+
+    /// Save and exit. The one path out, however it was asked for.
+    fn quit(&mut self, el: &ActiveEventLoop) {
+        self.store_position(el);
+        if let Err(e) = self.cfg.save(&self.dir) {
+            tracing::warn!(error = %e, "could not save the config on exit");
+        }
+        el.exit();
+    }
+
     fn store_position(&mut self, el: &ActiveEventLoop) {
         let size = self.surface_size();
         let mut best: Option<(usize, f32, f32)> = None;
@@ -959,17 +1116,18 @@ impl ApplicationHandler for App {
             tracing::warn!("click_through is on: the window ignores the mouse, so it cannot be dragged or closed by clicking");
         }
 
+        // After the window, because the icon is cut from the loaded sheet, and on
+        // the event-loop thread, because the tray owns a hidden message window that
+        // has to be pumped by this loop.
+        self.build_tray();
+
         self.next_frame = Instant::now() + self.frame_interval();
         el.set_control_flow(ControlFlow::WaitUntil(self.next_frame));
     }
 
     fn window_event(&mut self, el: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
         match event {
-            WindowEvent::CloseRequested => {
-                self.store_position(el);
-                let _ = self.cfg.save(&self.dir);
-                el.exit();
-            }
+            WindowEvent::CloseRequested => self.quit(el),
             WindowEvent::MouseInput { state, button, .. } => {
                 tracing::debug!(
                     ?button,
@@ -989,13 +1147,12 @@ impl ApplicationHandler for App {
                         let on = self.playback.toggle_anticipation();
                         tracing::info!(anticipate = on, "A/B toggle");
                     }
-                    // M1 still has no tray, and WS_EX_NOACTIVATE means no keyboard
-                    // — so right-click is the only way out. Replaced in M5.
+                    // Kept alongside the tray rather than replaced by it. It is the
+                    // only exit that still works if the shell refuses a tray icon,
+                    // and by now it is muscle memory.
                     (MouseButton::Right, ElementState::Pressed) => {
                         self.end_drag();
-                        self.store_position(el);
-                        let _ = self.cfg.save(&self.dir);
-                        el.exit();
+                        self.quit(el);
                     }
                     _ => {}
                 }
@@ -1006,6 +1163,10 @@ impl ApplicationHandler for App {
 
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
         self.drain_events();
+        self.drain_tray(el);
+        if el.exiting() {
+            return;
+        }
 
         // While dragging, track the cursor in screen coordinates. Window-relative
         // events are useless here because the window moves with the pointer.
