@@ -30,3 +30,11 @@ dist/
 
 # Portable layout puts config beside the executable (spec §13).
 config.toml
+
+# Music. A track dropped in for testing is somebody's recording, and this
+# repository is public -- assets/ is for the sheet that ships, not for audio.
+*.mp3
+*.flac
+*.wav
+*.m4a
+*.ogg
