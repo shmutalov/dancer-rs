@@ -559,7 +559,7 @@ checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 
 [[package]]
 name = "dancer-analyze"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "beat-this",
  "dancer-score",
@@ -570,7 +570,7 @@ dependencies = [
 
 [[package]]
 name = "dancer-app"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "crossbeam-channel",
@@ -595,7 +595,7 @@ dependencies = [
 
 [[package]]
 name = "dancer-choreo"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "dancer-score",
  "thiserror 2.0.20",
@@ -604,7 +604,7 @@ dependencies = [
 
 [[package]]
 name = "dancer-clock"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "dancer-score",
  "tracing",
@@ -612,7 +612,7 @@ dependencies = [
 
 [[package]]
 name = "dancer-render"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "dancer-sprite",
  "raw-window-handle",
@@ -624,7 +624,7 @@ dependencies = [
 
 [[package]]
 name = "dancer-score"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "rusqlite",
  "serde",
@@ -635,7 +635,7 @@ dependencies = [
 
 [[package]]
 name = "dancer-source"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "dancer-score",
  "thiserror 2.0.20",
@@ -645,7 +645,7 @@ dependencies = [
 
 [[package]]
 name = "dancer-sprite"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "image",
@@ -657,7 +657,7 @@ dependencies = [
 
 [[package]]
 name = "dancer-yandex"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "dancer-analyze",
  "dancer-score",
