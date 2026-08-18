@@ -126,9 +126,13 @@ jobs:
             'assets/default.png', 'assets/default.txt', 'assets/default.toml',
             'models/mel_spectrogram.onnx', 'models/beat_this_small.onnx'
           )
+          # Compress-Archive writes backslash separators under Windows PowerShell and
+          # forward ones under 7, so normalise. [char]92 rather than a quoted backslash:
+          # this text passes through YAML and PowerShell quoting, and a lone backslash
+          # survives neither reliably.
           $unexpected = $entries |
             Where-Object { -not $_.EndsWith('/') } |
-            ForEach-Object { $_ -replace '\', '/' } |
+            ForEach-Object { $_.Replace([char]92, '/') } |
             Where-Object { $allowed -notcontains $_ }
           if ($unexpected) { throw "unexpected files in the package:`n  $($unexpected -join "`n  ")" }
           Write-Host 'package contents ok' -ForegroundColor Green
