@@ -57,6 +57,9 @@ pub struct Playback {
     /// drives — it just stops pulling each move's start back, so the accent lands
     /// late instead of on the beat. Mirrors `Scheduler::anticipating`.
     anticipate: bool,
+    /// Kept so a hot reload can rebuild the scheduler reproducibly (spec §11.3's
+    /// weighted random is only debuggable if a run can be repeated).
+    seed: u64,
 }
 
 impl Playback {
@@ -68,6 +71,7 @@ impl Playback {
             agreements: 0,
             scheduler: Scheduler::new(rows, fallback, seed),
             anticipate: true,
+            seed,
         }
     }
 
@@ -93,6 +97,20 @@ impl Playback {
         self.scheduler.set_anticipate(self.anticipate);
         tracing::info!(anticipate = self.anticipate, "anticipation toggled");
         self.anticipate
+    }
+
+    /// Swap in a different sheet's rows (hot reload, ROADMAP M5).
+    ///
+    /// Replaces the scheduler outright rather than mutating it: everything queued
+    /// refers to rows of the old sheet by index, and an index that survives into a
+    /// sheet with different artwork is worse than one that does not — it draws the
+    /// wrong move instead of nothing.
+    pub fn set_rows(&mut self, rows: Vec<RowInfo>, fallback: usize) {
+        let latency = self.scheduler.render_latency();
+        let anticipate = self.scheduler.anticipating();
+        self.scheduler = Scheduler::new(rows, fallback, self.seed);
+        self.scheduler.set_render_latency(latency);
+        self.scheduler.set_anticipate(anticipate);
     }
 
     /// Fold one message in. Returns true if the state changed.

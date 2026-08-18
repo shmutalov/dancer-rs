@@ -40,6 +40,7 @@ mod events;
 mod library;
 mod playback;
 mod tray;
+mod watch;
 
 /// The score cache, beside the executable (spec §5.1, §13).
 const SCORE_DB: &str = "scores.db";
@@ -226,6 +227,11 @@ fn main() -> anyhow::Result<()> {
         playback.toggle_anticipation();
     }
 
+    // Built before the struct takes ownership of `dir`.
+    let watch = watch::Watch::new(&dir.join("config.toml"), &sheet_path)
+        .inspect_err(|e| tracing::warn!(error = %e, "no hot reload"))
+        .ok();
+
     let mut app = App {
         row: sheet.default_row,
         sheet,
@@ -244,6 +250,8 @@ fn main() -> anyhow::Result<()> {
         next_frame: Instant::now(),
         tray: None,
         tray_shown: None,
+        watch,
+        sheet_path,
     };
     event_loop.run_app(&mut app)?;
     Ok(())
@@ -685,6 +693,11 @@ struct App {
     /// `None` until `resumed`, and `None` for good if the shell refused it. A
     /// missing tray is a degraded UI, never a reason not to dance.
     tray: Option<tray::Tray>,
+    /// `None` if the platform watcher could not start. Hot reload is a convenience;
+    /// losing it must not stop the dancer.
+    watch: Option<watch::Watch>,
+    /// Path the sheet was loaded from, so a reload knows what to re-read.
+    sheet_path: PathBuf,
     /// What the tray menu was last told, so it is only rewritten on change.
     tray_shown: Option<(String, Option<String>, bool, bool, bool, i64)>,
 }
@@ -870,6 +883,134 @@ impl App {
             self.cfg.playback.offset_secs,
         );
         self.tray_shown = Some(now);
+    }
+
+    /// Re-read whatever changed on disk (ROADMAP M5).
+    fn drain_watch(&mut self) {
+        let Some(w) = self.watch.as_mut() else {
+            return;
+        };
+        let changes = w.poll(Instant::now());
+        for change in changes {
+            match change {
+                watch::Change::Config => self.reload_config(),
+                watch::Change::Artwork => self.reload_sheet(),
+            }
+        }
+    }
+
+    /// Re-read `config.toml`, applying only what can be changed live.
+    ///
+    /// Sources, the Yandex token and the library folders are **not** re-applied:
+    /// they own live threads, and half-swapping a running source is a much bigger
+    /// change than it looks. A restart is honest for those and rare in practice.
+    ///
+    /// The window position is deliberately not re-applied either. It is written
+    /// *by* the app whenever the sprite is dragged, so honouring it on reload would
+    /// make the dancer jump back to wherever the file happened to say.
+    fn reload_config(&mut self) {
+        let fresh = Config::load(&self.dir);
+        let (pos_x, pos_y, monitor) = (
+            self.cfg.window.x,
+            self.cfg.window.y,
+            self.cfg.window.monitor,
+        );
+
+        let sheet_changed = fresh.sheet_path(&self.dir) != self.cfg.sheet_path(&self.dir);
+        let resize = fresh.sprite.scale != self.cfg.sprite.scale;
+
+        self.cfg.sprite = fresh.sprite;
+        self.cfg.window = fresh.window;
+        self.cfg.playback = fresh.playback;
+        self.cfg.window.x = pos_x;
+        self.cfg.window.y = pos_y;
+        self.cfg.window.monitor = monitor;
+
+        self.playback.clock.set_offset(self.cfg.playback.offset_secs);
+        if let Some(hwnd) = self.hwnd {
+            apply_window_styles(hwnd, self.cfg.window.click_through);
+        }
+        if let Some(win) = self.window.as_ref() {
+            win.set_window_level(if self.cfg.window.always_on_top {
+                WindowLevel::AlwaysOnTop
+            } else {
+                WindowLevel::Normal
+            });
+        }
+
+        tracing::info!(
+            offset_ms = self.cfg.playback.offset_secs * 1000.0,
+            scale = self.cfg.sprite.scale,
+            fps = self.cfg.sprite.fps,
+            "config reloaded"
+        );
+
+        if sheet_changed {
+            self.sheet_path = self.cfg.sheet_path(&self.dir);
+            if let Some(w) = self.watch.as_mut() {
+                w.set_sheet(&self.sheet_path);
+            }
+            self.reload_sheet();
+        } else if resize {
+            self.resize_surface();
+        }
+        self.tray_shown = None;
+        self.refresh_tray();
+    }
+
+    /// Re-read the sheet from disk.
+    ///
+    /// **A failed load keeps the sheet already in memory.** Saving a PNG is not
+    /// atomic in every editor, and a sheet swapped for an error would leave nothing
+    /// to draw — so a bad read is a warning and the dancer carries on with what it
+    /// had.
+    fn reload_sheet(&mut self) {
+        let sheet = match Sheet::load(&self.sheet_path) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(
+                    sheet = %self.sheet_path.display(),
+                    error = %e,
+                    "reload failed; keeping the sheet already loaded"
+                );
+                return;
+            }
+        };
+
+        let resize = sheet.cell_width != self.sheet.cell_width
+            || sheet.cell_height != self.sheet.cell_height;
+
+        // Row indices belong to the old sheet and mean nothing in the new one.
+        self.row = sheet.default_row;
+        self.cell = 0;
+        self.row_before_drag = None;
+        self.sheet = sheet;
+
+        // The scheduler holds a description of rows that no longer exist, and moves
+        // planned against them.
+        self.playback.set_rows(row_info(&self.sheet), self.sheet.default_row);
+
+        tracing::info!(
+            sheet = %self.sheet_path.display(),
+            rows = self.sheet.rows.len(),
+            "artwork reloaded"
+        );
+
+        if resize {
+            self.resize_surface();
+        } else {
+            self.draw();
+        }
+    }
+
+    /// Rebuild the surface after the cell size or scale changed.
+    fn resize_surface(&mut self) {
+        let (w, h) = self.surface_size();
+        self.surface = Surface::new(w, h).ok();
+        if let Some(win) = self.window.as_ref() {
+            let _ = win.request_inner_size(PhysicalSize::new(w, h));
+        }
+        self.draw();
     }
 
     /// Save and exit. The one path out, however it was asked for.
@@ -1184,6 +1325,7 @@ impl ApplicationHandler for App {
 
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
         self.drain_events();
+        self.drain_watch();
         self.drain_tray(el);
         if el.exiting() {
             return;

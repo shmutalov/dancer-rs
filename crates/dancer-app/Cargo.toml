@@ -28,6 +28,7 @@ winit.workspace = true
 windows.workspace = true
 tokio = { version = "1", features = ["rt"], optional = true }
 tray-icon = { version = "0.24", default-features = false }
+notify = "8.2.0"
 
 [features]
 # On by default because it is the only path that gives a streamed track a grid.
