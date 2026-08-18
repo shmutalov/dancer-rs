@@ -649,6 +649,24 @@ and no amount of work on this adapter moves it.
 **Note:** streaming being unscored is the design (§4.2), not an unfinished edge.
 Surface it in the UI so it does not read as a bug.
 
+**A third gap, found in use on 2026-08-18: sessions coexist, and we picked the
+wrong one.** The adapter read `GetCurrentSession` first and enumerated only when
+that came back empty — which made "prefer a session that is playing" a rule that
+applied precisely when it was not needed. A browser tab that played something an
+hour ago is still a session, and Windows will name a stale one current on a track
+boundary. It read perfectly well, so the enumeration never ran, and the dancer
+followed a paused tab from then on. Reported as losing sync after exactly one song.
+
+Now every poll enumerates and ranks: playing outranks current, current settles
+ties. The ordering is a pure function with its own tests, because the defect was
+in the ordering and not in the WinRT calls, and that part can be tested without a
+media session. The allowlist stays the user's own narrowing on top — it was never
+the mechanism that was broken.
+
+The same day found the reason it took a user report to notice: a release build has
+no console, so nothing the app knew about this was reachable. It now writes
+`dancer-rs.log` beside the executable.
+
 ---
 
 ### M5 — Tray, configuration, packaging

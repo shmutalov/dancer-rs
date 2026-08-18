@@ -130,6 +130,18 @@ pass sheets on with copies of this app. The only artwork shipped here is the
 plain default sheet, which exists precisely so that nothing else has to be.
 
 
+When something looks wrong
+--------------------------
+
+The app writes dancer-rs.log beside the exe: what it saw playing, which media
+session it followed, and every state change. It rotates at 2 MB and keeps one
+previous file, so it cannot grow without bound.
+
+If the dancer stops following your music, that file will say whether it lost the
+track, could not find a beat grid for it, or is following a different app's media
+session. Set RUST_LOG=dancer_rs=debug for more detail.
+
+
 Controls
 --------
 

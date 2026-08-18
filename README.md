@@ -53,6 +53,10 @@ is 469 ms, so leaving it untrimmed can put the dancer half a beat out.
 | Right click | quit |
 | Tray | dancer, offset, click-through, always-on-top, Yandex sign-in |
 
+If it ever stops following your music, `dancer-rs.log` beside the executable says
+what it saw: which media session it followed, whether the track was recognised,
+and every state change.
+
 ## What syncs, and what does not
 
 Tracks you own and have analysed sync fully.

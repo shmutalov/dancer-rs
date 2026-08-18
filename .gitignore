@@ -38,3 +38,7 @@ config.toml
 *.wav
 *.m4a
 *.ogg
+
+# Logs, written beside the executable (data dir).
+*.log
+*.log.1

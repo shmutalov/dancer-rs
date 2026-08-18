@@ -40,6 +40,7 @@ mod console;
 mod dialog;
 mod events;
 mod library;
+mod logging;
 mod playback;
 mod sheets;
 mod tray;
@@ -66,17 +67,12 @@ fn main() -> anyhow::Result<()> {
         console::attach();
     }
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                // The binary target is `dancer-rs`, so its crate name is
-                // `dancer_rs` — not `dancer_app`, which matches nothing.
-                .unwrap_or_else(|_| {
-                    "dancer_rs=info,dancer_render=info,dancer_sprite=info,dancer_score=info".into()
-                }),
-        )
-        .with_target(false)
-        .init();
+    // Resolved before the subscriber exists, because the log file lives in it.
+    // `data_dir` logs one line when the exe directory turns out to be read-only,
+    // and that line is lost here — the resolved directory is logged below, which
+    // says the same thing in the case that matters.
+    let dir = data_dir();
+    let log = logging::init(&dir);
 
     let args = match cli::parse(argv.into_iter()) {
         Ok(a) => a,
@@ -86,8 +82,12 @@ fn main() -> anyhow::Result<()> {
         }
     };
 
-    let dir = data_dir();
     tracing::info!(dir = %dir.display(), "data directory");
+    match &log {
+        Some(p) => tracing::info!(file = %p.display(), "logging here too"),
+        // Not a warning: a read-only folder is a supported way to run this.
+        None => tracing::info!("no log file; this directory is not writable"),
+    }
 
     let cfg = Config::load(&dir);
 

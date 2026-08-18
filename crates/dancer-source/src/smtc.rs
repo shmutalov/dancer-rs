@@ -166,6 +166,17 @@ fn no_timeline(track: TrackMeta, playing: bool) -> Observation {
     }
 }
 
+/// How much a session deserves to drive the dancer. Higher wins.
+///
+/// **Playing outranks current**, and that ordering is the whole point. Windows
+/// decides which session is "current" on its own terms — most recent interaction,
+/// roughly — and after a track ends it will happily hand back a paused session
+/// while another app is audibly playing. Following the one making sound is right
+/// even when Windows disagrees; being current only settles ties.
+fn rank(playing: bool, is_current: bool) -> u8 {
+    (u8::from(playing) << 1) | u8::from(is_current)
+}
+
 /// Convert a FILETIME anchor into a local monotonic instant.
 ///
 /// The two clocks are different — `SystemTime` can jump, `Instant` cannot — so this
@@ -197,33 +208,51 @@ impl Source for SmtcSource {
     fn poll(&mut self) -> Result<Option<Observation>, SourceError> {
         let t0 = Instant::now();
 
-        // Prefer whichever session Windows considers current; fall back to
-        // scanning, since the current one may be an app we do not allow.
-        let current = self.manager.GetCurrentSession().ok();
-        let mut out = current.as_ref().and_then(|s| self.read(s));
+        // Every session, every poll — never `GetCurrentSession` alone.
+        //
+        // # The bug this shape exists to prevent
+        //
+        // This used to read the current session and only enumerate when that came
+        // back empty, which made "prefer a playing session" a rule that applied
+        // exactly when it was not needed. Sessions coexist: a browser tab that
+        // played something an hour ago, a paused Spotify, the player you are
+        // actually listening to. Windows names one of them current by its own
+        // rules, and after a track ends it can name a stale one — which read
+        // perfectly well, so the enumeration never ran, and the dancer followed a
+        // paused tab for the rest of the session. The reported symptom was losing
+        // sync after exactly one song.
+        //
+        // Enumerating always costs one extra IPC call on a 500 ms cadence. The
+        // measured read cost is logged below, and is the number to look at if that
+        // ever stops being a fair trade.
+        let sessions = self.manager.GetSessions().map_err(|e| SourceError::Read {
+            source_name: "smtc",
+            message: e.to_string(),
+        })?;
 
-        if out.is_none() {
-            let sessions = self
-                .manager
-                .GetSessions()
-                .map_err(|e| SourceError::Read {
-                    source_name: "smtc",
-                    message: e.to_string(),
-                })?;
-            for s in &sessions {
-                if let Some(obs) = self.read(&s) {
-                    // A playing session wins over a merely present one.
-                    let better = obs.playing || out.is_none();
-                    if better {
-                        let playing = obs.playing;
-                        out = Some(obs);
-                        if playing {
-                            break;
-                        }
-                    }
-                }
+        // Identity, not the session object: `GetCurrentSession` hands back a
+        // different COM wrapper for the same underlying session, so comparing
+        // pointers finds nothing.
+        let current_app = self
+            .manager
+            .GetCurrentSession()
+            .ok()
+            .and_then(|s| s.SourceAppUserModelId().ok())
+            .map(|s| s.to_string());
+
+        let mut best: Option<(u8, Observation)> = None;
+        for s in &sessions {
+            let app = s.SourceAppUserModelId().ok().map(|a| a.to_string());
+            let Some(obs) = self.read(&s) else { continue };
+            let is_current = app.is_some() && app == current_app;
+            let r = rank(obs.playing, is_current);
+            // Strictly greater, so ties keep the first session Windows listed
+            // rather than the last. Arbitrary either way, but stable.
+            if best.as_ref().is_none_or(|(best_r, _)| r > *best_r) {
+                best = Some((r, obs));
             }
         }
+        let out = best.map(|(_, obs)| obs);
 
         if self.measured_read.is_none() {
             let cost = t0.elapsed();
@@ -233,6 +262,7 @@ impl Source for SmtcSource {
             tracing::info!(
                 read_ms = cost.as_secs_f64() * 1000.0,
                 poll_ms = DEFAULT_POLL.as_secs_f64() * 1000.0,
+                sessions = sessions.Size().unwrap_or(0),
                 "SMTC read cost measured"
             );
         }
@@ -269,6 +299,24 @@ mod tests {
         // Must not produce an instant later than now; the clock would then
         // extrapolate backwards.
         assert!(anchor_instant(ahead) <= Instant::now());
+    }
+
+    #[test]
+    fn a_playing_session_beats_the_paused_one_windows_calls_current() {
+        // The defect this replaced: `GetCurrentSession` was read first and the
+        // enumeration only ran when it came back empty, so a paused-but-readable
+        // current session won every time. Sync was lost after one song, when
+        // Windows promoted a stale session on the track boundary.
+        assert!(rank(true, false) > rank(false, true));
+    }
+
+    #[test]
+    fn being_current_only_settles_ties() {
+        // Among two playing sessions, or two paused ones, current wins. It must
+        // never outrank actually making sound.
+        assert!(rank(true, true) > rank(true, false));
+        assert!(rank(false, true) > rank(false, false));
+        assert!(rank(false, true) < rank(true, false));
     }
 
     #[test]
