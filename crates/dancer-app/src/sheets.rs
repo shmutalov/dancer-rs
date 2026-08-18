@@ -28,7 +28,12 @@ pub const SOURCES: &[Source] = &[
     Source {
         name: "Umamusume (GameBanana)",
         url: "https://gamebanana.com/tools/21924",
-        owner: "the people who made it; the characters belong to Cygames",
+        // Credited by name, from the page's own credits panel. "Fan-made" is not
+        // an owner: somebody drew these, and a warning about ownership that
+        // cannot name the owner is not much of a warning.
+        owner: "Steak_Bananite, who made the sheets, and Cygames, Inc., who made \
+                Umamusume: Pretty Derby — with most of the Tanuki sprites supplied \
+                by vonvan",
     },
 ];
 
@@ -105,6 +110,23 @@ mod tests {
             assert!(s.url.starts_with("https://"), "{}: {}", s.name, s.url);
             assert!(!s.owner.trim().is_empty(), "{} names no owner", s.name);
             assert!(!s.name.trim().is_empty());
+        }
+    }
+
+    #[test]
+    fn no_user_facing_string_has_collapsed_line_continuations() {
+        // A `\` continuation in a Rust string keeps the *next* line's indentation
+        // unless the following line is flush left. Get it wrong and the text still
+        // compiles, still passes every other test, and renders in a dialog with a
+        // twenty-space gap in the middle of a sentence. Only reading it catches it —
+        // so this reads it.
+        for s in SOURCES {
+            for text in [s.name, s.owner, &ownership_warning(s)] {
+                assert!(
+                    !text.contains("  "),
+                    "run of spaces in a user-facing string: {text:?}"
+                );
+            }
         }
     }
 

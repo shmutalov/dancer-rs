@@ -102,14 +102,16 @@ The tray menu links to a couple of places, and so does this:
                Image-Line themselves:
 https://www.image-line.com/fl-studio-learning/fl-studio-online-manual/content/FLChan_HD.zip
 
-  Umamusume    Fan-made sheets on GameBanana:
+  Umamusume    Sheets by Steak_Bananite, on GameBanana:
 https://gamebanana.com/tools/21924
 
 **These are not ours, and downloading them does not make them yours.**
 
-Every sheet on those pages belongs to whoever made it — FL-Chan to Image-Line,
-the Umamusume sheets to their creators, with the characters themselves belonging
-to Cygames. They are published on their own terms; read them.
+Every sheet on those pages belongs to whoever made it. FL-Chan is Image-Line's.
+The Umamusume sheets were made by Steak_Bananite, with most of the Tanuki sprites
+supplied by vonvan, and the characters themselves belong to Cygames, Inc., who
+made Umamusume: Pretty Derby. All of it is published on its own terms; read
+them.
 
 dancer-rs does not host, bundle or redistribute any of it, and please do not
 pass sheets on with copies of this app. The only artwork shipped here is the

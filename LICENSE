@@ -36,9 +36,10 @@ their own upstream licence, not by this one.
 unless stated, and only the plain default sheet is distributed here at all.
 
 The application links to places sheets can be downloaded from, and warns before
-opening each one. Those links are pointers, not permission: FL-Chan belongs to
-Image-Line, fan-made sheets belong to their creators and often depict characters
-owned by someone else again. Each is published on its own terms.
+opening each one. Those links are pointers, not permission. FL-Chan belongs to
+Image-Line. The Umamusume sheets were made by Steak_Bananite, with most of the
+Tanuki sprites supplied by vonvan, and depict characters belonging to Cygames,
+Inc. Each is published on its own terms.
 
 In particular, FL-Chan **must not be redistributed** — it is excluded from this
 repository and from every release package (spec §1.3).
