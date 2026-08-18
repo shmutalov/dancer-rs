@@ -1223,7 +1223,7 @@ table below.
 | **M2** | Real analyzer + score cache | `beat-this` produces a score from a local file, cached to disk, indistinguishable in use from the hand-written one |
 | **M3** | Anticipation scheduler | `impact_cell` respected; the A/B shows a visible difference. **The switch must vary only the lead** — until 2026-08-18 it bypassed the scheduler and compared choreography against an idle row (§11.2) |
 | **M4** | SMTC source | Identity, position and pause/resume from Spotify desktop; correct freeze and resume-on-downbeat behaviour |
-| **M5** | Tray UI, config, packaging | Installable by a stranger |
+| **M5** | Tray UI, config, packaging — **done 2026-08-18** | Installable by a stranger: tray with the §9.2 offset nudge, `[library] folders`, hot reload, and a release zip verified from a clean folder |
 | **M6** | *Optional:* Yandex canonical IDs, segment labels | Only if M5 shows unlabelled pools are the visible gap. The Yandex **fetcher** landed early, in M4 (§6.4.1); the **resolver** did not, and is what is left here. Spotify cut 2026-08-17 (§6.3) |
 
 The old M5 (WASAPI loopback) and M6 (learn-on-second-listen) were cut with the

@@ -236,7 +236,7 @@ M4's value is real.
 | **M2** | Real analyzer + score cache — **done 2026-08-15** | `beat-this` produces a score from a local file, cached to disk, indistinguishable in use from the hand-written one |
 | **M3** | **Anticipation scheduler** — built 2026-08-15; **A/B apparatus fixed 2026-08-18, verdict still open** | `impact_cell` respected. The switch now varies only the lead, having previously compared choreography against an idle row — see below |
 | **M4** | SMTC source, tag reading, library scanner, **Yandex fetcher** — **done 2026-08-17** | Identity, position and pause/resume from a desktop player; correct freeze and resume-on-downbeat. Grew past its brief: §5.9's reversal pulled the Yandex fetch-analyse-delete path in two milestones early |
-| **M5** | Tray UI, config, packaging | Installable by a stranger |
+| **M5** | Tray UI, config, packaging — **done 2026-08-18** | Installable by a stranger. Tray with the offset nudge, `[library] folders`, hot reload, and `packaging/build-release.ps1` producing a 16.6 MB zip verified from a clean folder |
 | **M6** | *Optional:* Yandex canonical IDs, segment labels | Only if M5 shows unlabelled pools are the visible gap. The Yandex **fetcher** landed in M4; the **resolver** is what is left — see §5.8. Spotify cut 2026-08-17 (spec §6.3) |
 
 Two milestones were cut, not renamed. The old M5 (WASAPI loopback) and M6
@@ -666,6 +666,27 @@ Surface it in the UI so it does not read as a bug.
   sheet format.
 
 **Exit:** a stranger can install and run it.
+
+#### Done 2026-08-18
+
+All five landed. Notes on what turned out differently:
+
+- **The tray icon is cut from the loaded sheet** rather than shipped as an
+  `.ico` — thirty lines, one less file, and it shows which sheet is running.
+  Cells are premultiplied for `UpdateLayeredWindow`, so alpha has to be divided
+  back out, and the cell needs a square crop to its opaque bounds or the figure
+  ends up a few pixels tall in the corner.
+- **Right-click to quit was kept, not replaced.** It is the only exit left if the
+  shell refuses a tray icon.
+- **`[library] folders` was missing entirely.** Scan paths were command-line only,
+  which meant the product's primary path — analyse your own music, let SMTC
+  recognise it — was reachable only from a terminal.
+- **Weights are fetched at packaging time**, not vendored and not fetched on first
+  run, and pinned by SHA-256. Upstream is a moving branch, so the checksum is the
+  only thing that makes two builds of one version comparable.
+- **Hot reload deliberately excludes sources, the token and library folders.** They
+  own live threads. It also ignores the stored window position, which the app
+  writes itself on every drag, and keeps the current sheet when a reload fails.
 
 ---
 
