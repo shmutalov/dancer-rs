@@ -24,8 +24,9 @@ pub struct Args {
     pub models: Option<PathBuf>,
     /// Skip the score cache entirely: always re-analyse, never write.
     pub no_cache: bool,
-    /// Start with anticipation off — M1's plain grid loop. Middle-click toggles it
-    /// at runtime, which is how the M3 A/B is actually judged.
+    /// Start with the anticipation lead removed: same choreography, but each move
+    /// begins on its beat rather than early, so accents land late. Middle-click
+    /// toggles it at runtime, which is how the M3 A/B is actually judged.
     pub no_anticipate: bool,
     /// Do not follow the system media session. Without this, and with no `--audio`
     /// or `--score`, the dancer follows whatever the user is playing.
@@ -70,7 +71,7 @@ your music first:
   --score <FILE.json>   Use this beat grid instead of analysing
   --models <DIR>        ONNX weights directory (default: <data dir>/models)
   --no-cache            Always re-analyse; do not read or write scores.db
-  --no-anticipate       Start without anticipation (middle-click toggles it)
+  --no-anticipate       Start with the anticipation lead off (middle-click toggles)
   --no-smtc             Do not follow the system media session
   --no-fetch            Never fetch a streamed track for analysis
   --write-config        Write a complete config.toml and exit

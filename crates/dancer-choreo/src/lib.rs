@@ -96,6 +96,12 @@ pub struct Scheduler {
     /// Media time up to which bars have been planned.
     planned_to: f64,
     render_latency: f64,
+    /// Whether a move's start is pulled back so its impact lands on the beat.
+    ///
+    /// Off is not "no scheduling" — it is the *same* choreography with the lead
+    /// removed, which is the only comparison that isolates anticipation. See
+    /// [`Scheduler::set_anticipate`].
+    anticipate: bool,
     rng: Rng,
     /// Energy distribution of the track being scheduled, rebuilt when it changes.
     profile: EnergyProfile,
@@ -118,6 +124,7 @@ impl Scheduler {
             previous_row: None,
             planned_to: f64::NEG_INFINITY,
             render_latency: 0.0,
+            anticipate: true,
             rng: Rng::new(seed),
             profile: EnergyProfile::default(),
             articulation: Articulation::default(),
@@ -139,6 +146,43 @@ impl Scheduler {
 
     pub fn render_latency(&self) -> f64 {
         self.render_latency
+    }
+
+    /// Turn anticipation off or on, for the A/B in ROADMAP M3.
+    ///
+    /// # Why this is not simply "stop scheduling"
+    ///
+    /// It used to be. `Playback::frame` returned `None` with anticipation off and
+    /// the caller fell back to looping the **default row** against the grid — so
+    /// the A/B compared nine choreographed rows against one idle row. On the
+    /// default sheet that read as a difference and the test looked fine; on FL
+    /// Chan, whose default row is `Waiting` and moves three pixels, it reads as
+    /// "dancing" versus "standing still". Either way it was measuring
+    /// choreography, not anticipation.
+    ///
+    /// The comparison that isolates the thesis holds everything else fixed — same
+    /// rows, same phrase, same loop rate — and changes only *when the loop starts*.
+    /// With anticipation the move begins `impact_cell` frames early so its accent
+    /// lands on the beat; without it the move begins on the beat and the accent
+    /// arrives late by exactly that much.
+    ///
+    /// Render latency stays applied in both, because it corrects a different error
+    /// and leaving it in one arm only would confound the thing under test.
+    ///
+    /// Rows with `impact_cell = 0` are identical either way. That is not a bug —
+    /// three of FL Chan's nine rows have their accent on the first cell, and during
+    /// those the A/B genuinely has nothing to show.
+    pub fn set_anticipate(&mut self, on: bool) {
+        if self.anticipate == on {
+            return;
+        }
+        self.anticipate = on;
+        // Queued moves carry a `start_at` computed under the old setting.
+        self.reset();
+    }
+
+    pub fn anticipating(&self) -> bool {
+        self.anticipate
     }
 
     pub fn rows(&self) -> &[RowInfo] {
@@ -262,10 +306,16 @@ impl Scheduler {
         };
         let frame_duration = span / row.cells.max(1) as f64;
 
+        // The whole milestone, in one line — and the one line the A/B removes.
+        let lead = if self.anticipate {
+            row.impact_cell as f64 * frame_duration
+        } else {
+            0.0
+        };
+
         Some(ScheduledMove {
             row: row.index,
-            // The whole milestone, in one line.
-            start_at: target - row.impact_cell as f64 * frame_duration - self.render_latency,
+            start_at: target - lead - self.render_latency,
             frame_duration,
             target_beat: target,
             cells: row.cells,
@@ -510,6 +560,84 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn without_anticipation_a_move_starts_on_its_beat() {
+        // The other arm of the M3 A/B. Same rows, same phrase, same loop rate —
+        // only the lead is gone, so the accent arrives late by exactly the amount
+        // anticipation would have removed.
+        let s = score(0.55);
+        let mut sch = sched();
+        sch.set_anticipate(false);
+        sch.plan(&s, 0.0);
+
+        for m in &sch.queue {
+            assert!(
+                (m.start_at - m.target_beat).abs() < 1e-9,
+                "row {} starts at {} for a beat at {}",
+                m.row,
+                m.start_at,
+                m.target_beat
+            );
+        }
+    }
+
+    #[test]
+    fn the_two_arms_differ_only_in_phase() {
+        // What makes this a valid A/B: identical choreography, identical timing,
+        // and a start offset of exactly `impact_cell` frames. If the arms differed
+        // in which rows they picked, the test would be measuring choreography —
+        // which is precisely what it did before, by falling back to the default row.
+        let s = score(0.55);
+
+        let plan = |anticipate: bool| {
+            let mut sch = sched();
+            sch.set_anticipate(anticipate);
+            sch.plan(&s, 0.0);
+            sch.queue.iter().cloned().collect::<Vec<_>>()
+        };
+        let with = plan(true);
+        let without = plan(false);
+
+        assert_eq!(with.len(), without.len(), "same number of moves");
+        for (a, b) in with.iter().zip(&without) {
+            assert_eq!(a.row, b.row, "same row chosen");
+            assert_eq!(a.target_beat, b.target_beat, "same beat targeted");
+            assert_eq!(a.cells, b.cells);
+            assert!((a.frame_duration - b.frame_duration).abs() < 1e-12);
+
+            let lead = rows()[a.row].impact_cell as f64 * a.frame_duration;
+            assert!(
+                (b.start_at - a.start_at - lead).abs() < 1e-9,
+                "row {} should lead by {lead}s, got {}",
+                a.row,
+                b.start_at - a.start_at
+            );
+        }
+        // And at least one row must actually differ, or the assertion above is
+        // satisfied by an all-zero `impact_cell` sheet and proves nothing.
+        assert!(
+            with.iter().zip(&without).any(|(a, b)| a.start_at < b.start_at),
+            "no row had a lead to remove"
+        );
+    }
+
+    #[test]
+    fn toggling_anticipation_replans_rather_than_leaving_stale_starts() {
+        let s = score(0.55);
+        let mut sch = sched();
+        sch.plan(&s, 0.0);
+        assert!(sch.queued() > 0);
+
+        sch.set_anticipate(false);
+        assert_eq!(sch.queued(), 0, "queued moves carry the old lead");
+
+        // Setting it to what it already is must not throw away a good queue.
+        sch.plan(&s, 0.0);
+        let n = sch.queued();
+        sch.set_anticipate(false);
+        assert_eq!(sch.queued(), n);
     }
 
     #[test]

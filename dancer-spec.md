@@ -972,6 +972,22 @@ Each frame, the render thread evaluates `clock.position(now)`, pops any move who
 `start_at` has passed, and computes the current cell as
 `floor((pos - start_at) / frame_duration)`.
 
+**The A/B must vary only the lead** (M3, corrected 2026-08-18). Turning anticipation
+off originally bypassed the scheduler, and the caller then looped the *default row*
+against the grid — so the comparison was nine choreographed rows against one idle
+row. On a three-row sheet that reads as some difference and the test looked sound;
+on FL Chan, whose default row moves three pixels, one arm dances and the other
+stands still. Both measure choreography, not anticipation. The switch now holds
+rows, phrase and loop rate fixed and changes only `start_at`.
+
+**A loop shifted is still a loop.** Both arms are beat-locked and repeat at the same
+rate; only the phase differs, by `impact_cell × frame_duration`. Whether that is
+*visible* depends entirely on the artwork having an accent legible enough to see
+land. Rows with `impact_cell = 0` are identical in both arms by construction — three
+of FL Chan's nine are — and a sheet of smooth cyclic loops cannot demonstrate the
+thesis at all. Judge the A/B on a move with an unmistakable accent, in a loud
+passage, or it proves nothing either way.
+
 ### 11.3 Move selection
 
 Given the segment label at the target beat and its energy:
@@ -1205,7 +1221,7 @@ table below.
 | **M0** | Window + sprite playback | FAOSDance parity: loads an existing sheet + `.txt`, loops at fixed fps, transparent, click-through, draggable |
 | **M1** | Local file source + BeatClock | Hand-written score JSON drives a beat-locked dance against a local WAV; visually in time for 3 min with no drift |
 | **M2** | Real analyzer + score cache | `beat-this` produces a score from a local file, cached to disk, indistinguishable in use from the hand-written one |
-| **M3** | Anticipation scheduler | `impact_cell` respected; A/B against M1 shows the difference is visible |
+| **M3** | Anticipation scheduler | `impact_cell` respected; the A/B shows a visible difference. **The switch must vary only the lead** — until 2026-08-18 it bypassed the scheduler and compared choreography against an idle row (§11.2) |
 | **M4** | SMTC source | Identity, position and pause/resume from Spotify desktop; correct freeze and resume-on-downbeat behaviour |
 | **M5** | Tray UI, config, packaging | Installable by a stranger |
 | **M6** | *Optional:* Yandex canonical IDs, segment labels | Only if M5 shows unlabelled pools are the visible gap. The Yandex **fetcher** landed early, in M4 (§6.4.1); the **resolver** did not, and is what is left here. Spotify cut 2026-08-17 (§6.3) |

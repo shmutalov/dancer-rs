@@ -53,8 +53,9 @@ pub struct Playback {
     /// before `Resync` returns to `Locked`.
     agreements: u8,
     scheduler: Scheduler,
-    /// When false, the scheduler is bypassed and the dancer loops one row off the
-    /// grid — M1's behaviour exactly. This is the A/B switch M3 exits on.
+    /// The A/B switch M3 exits on. When false the scheduler still chooses and still
+    /// drives — it just stops pulling each move's start back, so the accent lands
+    /// late instead of on the beat. Mirrors `Scheduler::anticipating`.
     anticipate: bool,
 }
 
@@ -78,14 +79,18 @@ impl Playback {
         self.anticipate
     }
 
-    /// Flip between anticipation and M1's plain grid loop.
+    /// Flip the lead on and off, keeping everything else identical.
     ///
     /// Exists for the A/B in ROADMAP M3: the difference is meant to be visible to
     /// someone who has not been told what changed, and that is much easier to
     /// judge when both can be seen back to back on the same track.
     pub fn toggle_anticipation(&mut self) -> bool {
         self.anticipate = !self.anticipate;
-        self.scheduler.reset();
+        // Hands the switch to the scheduler rather than bypassing it. Turning the
+        // scheduler *off* fell back to looping the default row, which compared
+        // choreography against an idle pose instead of comparing phase against
+        // phase — see `Scheduler::set_anticipate`.
+        self.scheduler.set_anticipate(self.anticipate);
         tracing::info!(anticipate = self.anticipate, "anticipation toggled");
         self.anticipate
     }
@@ -209,12 +214,15 @@ impl Playback {
 
     /// The row and cell to show at `now`, from the anticipation scheduler.
     ///
-    /// `None` means nothing is scheduled — a non-`Locked` state, anticipation
-    /// switched off, or a gap between moves. The caller falls back to
-    /// [`Playback::grid_cell`] on the default row, which is M1's behaviour and
-    /// keeps the dancer moving rather than freezing.
+    /// `None` means nothing is scheduled — a non-`Locked` state or a gap between
+    /// moves. The caller falls back to [`Playback::grid_cell`] on the default row,
+    /// which is M1's behaviour and keeps the dancer moving rather than freezing.
+    ///
+    /// **Anticipation being off is not one of those cases.** The scheduler still
+    /// chooses and still drives; it just stops pulling each move's start back. Any
+    /// other arrangement compares two things at once.
     pub fn frame(&mut self, now: Instant) -> Option<Frame> {
-        if !self.anticipate || !self.state.is_grid_driven() {
+        if !self.state.is_grid_driven() {
             return None;
         }
         let score = self.clock.score()?.clone();
@@ -403,19 +411,25 @@ mod tests {
     }
 
     #[test]
-    fn toggling_anticipation_falls_back_to_the_m1_loop() {
-        // The A/B switch. With anticipation off, `frame` yields nothing and the
-        // caller drives the default row off the grid, exactly as M1 did.
+    fn toggling_anticipation_keeps_dancing_rather_than_falling_back() {
+        // This test used to assert the opposite — that `frame` yields nothing with
+        // anticipation off, so the caller loops the **default row** off the grid.
+        // That made the M3 A/B compare choreography against an idle pose rather
+        // than comparing phase against phase, and on a sheet whose default row is
+        // near-motionless it reads as "dancing" versus "standing still".
+        //
+        // The scheduler now stays in charge in both arms; only the lead changes.
         let (mut p, at) = dancing(Instant::now());
         assert!(p.frame(at).is_some());
 
         assert!(!p.toggle_anticipation());
-        assert!(p.frame(at).is_none(), "anticipation off means no scheduled frame");
-        assert!(p.grid_cell(at, 4, 8).is_some(), "but the grid loop still runs");
+        assert!(
+            p.frame(at + Duration::from_secs(2)).is_some(),
+            "anticipation off must still schedule moves, or the A/B is not an A/B"
+        );
 
         assert!(p.toggle_anticipation());
-        // Back on, the next bar resumes moves.
-        assert!(p.frame(at + Duration::from_secs(2)).is_some());
+        assert!(p.frame(at + Duration::from_secs(4)).is_some());
     }
 
     #[test]

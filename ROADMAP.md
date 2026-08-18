@@ -234,7 +234,7 @@ M4's value is real.
 | **M0** | Window + sprite playback — **done 2026-08-15** | FAOSDance parity: loads an existing sheet + `.txt`, fixed-fps loop, transparent, click-through, draggable |
 | **M1** | Local file source + BeatClock — **done 2026-08-15** | Hand-written score JSON drives a beat-locked dance against a local WAV; no visible drift over 3 min |
 | **M2** | Real analyzer + score cache — **done 2026-08-15** | `beat-this` produces a score from a local file, cached to disk, indistinguishable in use from the hand-written one |
-| **M3** | **Anticipation scheduler** — built 2026-08-15, **A/B not yet judged** | `impact_cell` respected; A/B against M1 shows a difference visible to someone not told what changed |
+| **M3** | **Anticipation scheduler** — built 2026-08-15; **A/B apparatus fixed 2026-08-18, verdict still open** | `impact_cell` respected. The switch now varies only the lead, having previously compared choreography against an idle row — see below |
 | **M4** | SMTC source, tag reading, library scanner, **Yandex fetcher** — **done 2026-08-17** | Identity, position and pause/resume from a desktop player; correct freeze and resume-on-downbeat. Grew past its brief: §5.9's reversal pulled the Yandex fetch-analyse-delete path in two milestones early |
 | **M5** | Tray UI, config, packaging | Installable by a stranger |
 | **M6** | *Optional:* Yandex canonical IDs, segment labels | Only if M5 shows unlabelled pools are the visible gap. The Yandex **fetcher** landed in M4; the **resolver** is what is left — see §5.8. Spotify cut 2026-08-17 (spec §6.3) |
@@ -494,7 +494,45 @@ person can make, and nobody has made it yet. **Middle-click toggles anticipation
 and off at runtime**, on the same track, which is the only honest way to run that
 comparison; `--no-anticipate` starts in M1 mode.
 
-**The gate is blocked on M4, not on M3.** The A/B cannot be judged yet because
+#### Judged 2026-08-18 — and the test was wrong, not the thesis
+
+Run with audible music and the nine-row FL Chan sheet, the reported result was
+that **both arms looked in time**. Investigating that rather than accepting it
+found a defect in the apparatus.
+
+`Playback::frame` returned `None` with anticipation off, and the caller fell back
+to looping the **default row** against the grid. So the switch was not comparing
+lead against no-lead — it was comparing *nine choreographed rows* against *one
+idle row*. On the three-row default sheet that difference reads as something, which
+is why it never looked broken. On FL Chan, whose default row is `Waiting` and moves
+three pixels in eight cells, one arm is dancing and the other is standing still.
+Either way the thing being measured was choreography.
+
+The switch now stays inside the scheduler: same rows, same phrase, same loop rate,
+and only `start_at` changes. That is the only arrangement that isolates the claim.
+
+**What to expect when it is re-run.** The lead is `impact_cell x frame_duration`,
+so at 120 BPM on this sheet:
+
+| row | lead | row | lead |
+|---|---|---|---|
+| Stepping | **0 ms** | Zombie | 125 ms |
+| Waving | **0 ms** | Zitabata | 250 ms |
+| Windmill | **0 ms** | Jumping | 250 ms |
+| Waiting | 750 ms (but it barely moves) | Dervish | 375 ms |
+
+Three of nine rows have their accent on cell 0 and are **identical in both arms** —
+correctly, there is no lead to remove. So the comparison only says anything during
+Jumping, Dervish and Zitabata, all of which are loud-tier rows. **Judge it on a
+chorus, and watch the jump**: it is the one move on this sheet with an accent
+unmistakable enough to see land.
+
+That is itself a finding about the artwork. A sheet of smooth cyclic loops cannot
+demonstrate anticipation, because a loop shifted by two frames out of eight is
+still just a loop unless the eye can identify which frame is the accent.
+
+**The gate was blocked on M4, not on M3.** The A/B could not be judged before then
+because
 there is nothing to hear: the file source is a *simulated* transport (spec §6.5) and
 the app has no audio subsystem by design (§7). Watching a sprite move against
 silence says nothing about whether its accents land on the beat. M4 supplies the
