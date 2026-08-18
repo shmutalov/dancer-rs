@@ -32,7 +32,13 @@ theirs and is credited here (spec §1.3).
 tracker. The ONNX model weights are fetched at packaging time and are covered by
 their own upstream licence, not by this one.
 
-**Artwork is not covered by this licence.** No sprite sheet distributed with
-this software is the author's work unless stated. In particular, Fruity Dance's
-FL-Chan artwork belongs to Image-Line and **must not be redistributed** — it is
-excluded from this repository and from every release package.
+**Artwork is not covered by this licence.** No sprite sheet is the author's work
+unless stated, and only the plain default sheet is distributed here at all.
+
+The application links to places sheets can be downloaded from, and warns before
+opening each one. Those links are pointers, not permission: FL-Chan belongs to
+Image-Line, fan-made sheets belong to their creators and often depict characters
+owned by someone else again. Each is published on its own terms.
+
+In particular, FL-Chan **must not be redistributed** — it is excluded from this
+repository and from every release package (spec §1.3).

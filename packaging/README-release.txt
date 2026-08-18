@@ -63,16 +63,16 @@ The one exception is Yandex Music. If you sign in, a track you are playing can
 be fetched, analysed, and the audio deleted immediately, keeping only the beat
 grid. Nothing is stored and nothing is shared.
 
-    dancer-rs.exe --yandex-login
+Sign in from the tray menu — "Sign in to Yandex Music...". A code appears, a
+Yandex page opens in your browser, you type the code in. You authenticate with
+Yandex and never with us, and the dancer keeps dancing while you do it.
 
-Then in config.toml:
+It is off until you sign in; signing in is the request, so there is nothing else
+to switch on. The token is checked each time the app starts, and if it has
+expired or you revoked it, you are asked whether to sign in again.
 
-    [source.yandex]
-    fetch_for_analysis = true
-
-It is off until you do both. Your token is stored in config.toml in plain text —
-treat that file as a credential, and revoke the token from your Yandex account
-page if it ever gets out.
+Your token is stored in config.toml in plain text. Treat that file as a
+credential, and revoke it at https://id.yandex.ru/security if it ever gets out.
 
 
 Your own artwork
@@ -81,7 +81,7 @@ Your own artwork
 Any FAOSDance or Fruity Dance sheet works: a PNG that is 8 cells wide with one
 row per animation, plus a .txt naming the rows one per line.
 
-Drop it in assets\ and point config.toml at it:
+Drop it in assets\ and pick it from the tray, under Dancer. Or set it by hand:
 
     [sprite]
     sheet = "mysheet.png"
@@ -92,9 +92,28 @@ assets\default.toml for a worked example, and check your work with:
 
     dancer-rs.exe assets\mysheet.png --check-sheet
 
-The included default sheet is deliberately plain. FL-Chan, the sheet Fruity
-Dance ships, is Image-Line's artwork and is not distributed here — if you have
-a copy already, it works.
+
+Where to get dancers, and who owns them
+---------------------------------------
+
+The tray menu links to a couple of places, and so does this:
+
+  FL-Chan      The dancer from FL Studio's Fruity Dance, published by
+               Image-Line themselves:
+https://www.image-line.com/fl-studio-learning/fl-studio-online-manual/content/FLChan_HD.zip
+
+  Umamusume    Fan-made sheets on GameBanana:
+https://gamebanana.com/tools/21924
+
+**These are not ours, and downloading them does not make them yours.**
+
+Every sheet on those pages belongs to whoever made it — FL-Chan to Image-Line,
+the Umamusume sheets to their creators, with the characters themselves belonging
+to Cygames. They are published on their own terms; read them.
+
+dancer-rs does not host, bundle or redistribute any of it, and please do not
+pass sheets on with copies of this app. The only artwork shipped here is the
+plain default sheet, which exists precisely so that nothing else has to be.
 
 
 Controls

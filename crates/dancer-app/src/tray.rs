@@ -34,6 +34,8 @@ pub enum Action {
     OpenArtworkDir,
     /// Show the "where do dancers come from" help.
     SheetHelp,
+    /// Open a known sheet source, after the ownership warning.
+    OpenSheetSource(usize),
     /// Start the Yandex OAuth device flow.
     YandexSignIn,
     Quit,
@@ -92,6 +94,7 @@ struct Ids {
     sheets: Vec<MenuId>,
     open_artwork: MenuId,
     sheet_help: MenuId,
+    sources: Vec<MenuId>,
     yandex_sign_in: MenuId,
     quit: MenuId,
 }
@@ -106,6 +109,7 @@ impl Tray {
         now: &State,
         sheets: &[String],
         current_sheet: Option<usize>,
+        sources: &[&str],
     ) -> anyhow::Result<Self> {
         let menu = Menu::new();
 
@@ -149,6 +153,15 @@ impl Tray {
             &sheet_help,
         ])?;
 
+        // Links out, never downloads. Each one warns whose artwork it is before the
+        // browser opens — a menu the app drew reads as an endorsement otherwise.
+        let mut source_items = Vec::with_capacity(sources.len());
+        for name in sources {
+            let item = MenuItem::new(format!("Get {name}..."), true, None);
+            dancers.append(&item)?;
+            source_items.push(item);
+        }
+
         let yandex_item = MenuItem::new(&now.yandex, false, None);
         let yandex_sign_in = MenuItem::new("Sign in to Yandex Music...", true, None);
 
@@ -165,6 +178,7 @@ impl Tray {
             sheets: sheet_items.iter().map(|i| i.id().clone()).collect(),
             open_artwork: open_artwork.id().clone(),
             sheet_help: sheet_help.id().clone(),
+            sources: source_items.iter().map(|i| i.id().clone()).collect(),
             yandex_sign_in: yandex_sign_in.id().clone(),
             quit: quit.id().clone(),
         };
@@ -241,6 +255,8 @@ impl Tray {
                 Action::YandexSignIn
             } else if let Some(i) = self.ids.sheets.iter().position(|s| s == id) {
                 Action::SelectSheet(i)
+            } else if let Some(i) = self.ids.sources.iter().position(|s| s == id) {
+                Action::OpenSheetSource(i)
             } else if *id == self.ids.quit {
                 Action::Quit
             } else {

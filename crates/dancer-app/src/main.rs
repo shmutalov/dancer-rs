@@ -517,6 +517,22 @@ fn run_check_sheet(sheet: &Sheet) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Send the user to a sheet source, after saying whose artwork it is.
+///
+/// The warning is a confirmation rather than a footnote. The app is about to point
+/// someone at artwork it has no rights to, from a menu it drew, and that reads like
+/// an endorsement unless it says otherwise once, in front of the link.
+fn open_sheet_source(index: usize) {
+    let Some(source) = sheets::SOURCES.get(index) else {
+        return;
+    };
+    std::thread::spawn(move || {
+        if dialog::confirm("Whose artwork is this?", &sheets::ownership_warning(source)) {
+            dialog::open_url(source.url);
+        }
+    });
+}
+
 /// Describe the sheet's rows to the scheduler (spec §4.2, §11.3).
 fn row_info(sheet: &Sheet) -> Vec<dancer_choreo::RowInfo> {
     sheet
@@ -791,6 +807,7 @@ impl App {
             &self.tray_state(),
             &names,
             current,
+            &sheets::SOURCES.iter().map(|s| s.name).collect::<Vec<_>>(),
         ) {
             Ok(t) => {
                 tracing::info!("tray ready");
@@ -838,6 +855,7 @@ impl App {
                 tray::Action::OpenDataDir => dialog::open_dir(&self.dir),
                 tray::Action::OpenArtworkDir => dialog::open_dir(&self.artwork_dir()),
                 tray::Action::SheetHelp => self.show_sheet_help(),
+                tray::Action::OpenSheetSource(i) => open_sheet_source(i),
                 tray::Action::SelectSheet(i) => self.select_sheet(i),
                 tray::Action::YandexSignIn => {
                     self.account = account::Status::Checking;
@@ -1055,23 +1073,31 @@ impl App {
     fn show_sheet_help(&self) {
         let dir = self.artwork_dir();
         std::thread::spawn(move || {
-            dialog::info(
-                "Adding dancers",
-                &format!(
-                    "A dancer is a sprite sheet: one PNG that is 8 cells wide, with \
-                     one row per animation, plus a .txt naming those rows one per line.\n\n\
-                     The format comes from FAOSDance and Fruity Dance, so sheets made \
-                     for either will work here.\n\n\
-                     To add one:\n\n\
-                     1. Put the .png and its .txt in\n     {}\n\
-                     2. Pick it from the tray under Dancer.\n\n\
-                     For it to dance in time rather than just loop, add a .toml beside \
-                     the PNG saying which cell is each move's accent. See default.toml \
-                     in that folder for a worked example, and check your work with:\n\n\
-                          dancer-rs.exe <sheet.png> --check-sheet",
-                    dir.display()
-                ),
+            let mut t = String::new();
+            t.push_str(
+                "A dancer is a sprite sheet: one PNG that is 8 cells wide, with one row                  per animation, plus a .txt naming those rows one per line.
+
+                 The format comes from FAOSDance and Fruity Dance, so sheets made for                  either will work here.
+
+                 To add one:
+
+                   1. Put the .png and its .txt in
+       ",
             );
+            t.push_str(&dir.display().to_string());
+            t.push_str(
+                "
+  2. Pick it from the tray, under Dancer.
+
+                 For it to dance in time rather than just loop, add a .toml beside the                  PNG saying which cell is each move's accent. See default.toml in that                  folder for a worked example, and check your work with:
+
+                        dancer-rs.exe <sheet.png> --check-sheet
+
+                 ---
+
+                 Sprite sheets are other people's work. Neither dancer-rs nor you own                  the artwork on the pages linked in that menu — it belongs to whoever                  made it, published on their terms. Nothing is bundled or                  redistributed here, and please do not pass sheets on with copies of                  this app. The only artwork shipped with it is the plain default sheet.",
+            );
+            dialog::info("Adding dancers", &t);
         });
     }
 
