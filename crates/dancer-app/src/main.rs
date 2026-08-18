@@ -106,8 +106,8 @@ fn main() -> anyhow::Result<()> {
     // A command, not a mode: analyse and exit. Deliberately separate from the
     // dancer, because a library scan is minutes of work and should not be
     // happening invisibly behind a sprite.
-    if !args.scan.is_empty() {
-        return run_scan(&args, &dir);
+    if args.scan_requested() {
+        return run_scan(&args, &cfg, &dir);
     }
 
     let sheet_path = args.sheet.clone().unwrap_or_else(|| cfg.sheet_path(&dir));
@@ -366,15 +366,36 @@ fn stream_fallback(
 }
 
 /// `--scan`: fill the cache so SMTC has something to recognise (spec §13).
-fn run_scan(args: &cli::Args, dir: &Path) -> anyhow::Result<()> {
+///
+/// Folders come from the command line when given, and otherwise from
+/// `[library] folders`. Bare `--scan` is the form a stranger runs after setting the
+/// folders once — the alternative was retyping paths on every rescan.
+fn run_scan(args: &cli::Args, cfg: &Config, dir: &Path) -> anyhow::Result<()> {
     let db = (!args.no_cache).then(|| dir.join(SCORE_DB));
     let models = args.models.clone().unwrap_or_else(|| dir.join("models"));
 
-    println!("Scanning {} folder(s)…", args.scan.len());
+    let folders = if args.scan.is_empty() {
+        cfg.library.paths()
+    } else {
+        args.scan.clone()
+    };
+    if folders.is_empty() {
+        println!("No folders to scan.
+");
+        println!("Either name one:");
+        println!("  dancer-rs --scan D:/music
+");
+        println!("or set them once in {}:", dir.join("config.toml").display());
+        println!("  [library]");
+        println!("  folders = [\"D:/music\"]");
+        return Ok(());
+    }
+
+    println!("Scanning {} folder(s)…", folders.len());
     let started = Instant::now();
     let mut last = 0usize;
 
-    let report = library::scan(&args.scan, db.as_deref(), &models, &mut |r, path| {
+    let report = library::scan(&folders, db.as_deref(), &models, &mut |r, path| {
         let done = r.analysed + r.cached + r.failed;
         // Printed rather than logged: this is a foreground command whose whole
         // output is progress, and it can run for minutes on a real library.

@@ -16,6 +16,34 @@ pub struct Config {
     pub window: WindowCfg,
     pub playback: Playback,
     pub source: SourceCfg,
+    pub library: LibraryCfg,
+}
+
+/// Where the user's own music lives (spec §8.3, §13).
+///
+/// Analysis needs a file it can read, and SMTC never reports a path — so the
+/// library index is the whole bridge between "something is playing" and "we have a
+/// grid for it". Until M5 these folders could only be given as `--scan` arguments,
+/// which meant the primary path of the product was reachable only from a terminal.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LibraryCfg {
+    /// Folders scanned by `--scan` when no folder is named on the command line.
+    ///
+    /// Empty by default. Guessing at `%USERPROFILE%\Music` would mean a first run
+    /// that silently spends minutes analysing whatever happens to be there.
+    pub folders: Vec<String>,
+}
+
+impl LibraryCfg {
+    pub fn paths(&self) -> Vec<PathBuf> {
+        self.folders
+            .iter()
+            .map(|f| f.trim())
+            .filter(|f| !f.is_empty())
+            .map(PathBuf::from)
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -131,6 +159,7 @@ impl Default for Config {
             window: WindowCfg::default(),
             playback: Playback::default(),
             source: SourceCfg::default(),
+            library: LibraryCfg::default(),
         }
     }
 }

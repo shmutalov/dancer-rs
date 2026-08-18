@@ -48,8 +48,15 @@ pub struct Args {
     /// Folders to analyse into the cache, then exit.
     ///
     /// The SMTC source can only recognise tracks the library already knows, so
-    /// with an empty cache every track misses. Repeatable.
+    /// with an empty cache every track misses. Repeatable, and it may be given with
+    /// no value at all — bare `--scan` uses `[library] folders` from the config.
     pub scan: Vec<PathBuf>,
+    /// Whether `--scan` appeared, even with no folder after it.
+    ///
+    /// Separate from `scan` being non-empty because those mean different things:
+    /// no flag is "run the dancer", and the flag with no folder is "scan what the
+    /// config says".
+    pub scan_flag: bool,
     /// Run the simulated transport off nominal speed, to give the clock real drift
     /// to absorb. Dev lever for exercising spec §9.1.
     pub rate: Option<f64>,
@@ -66,7 +73,8 @@ your music first:
 
   dancer-rs --scan D:/music
 
-  --scan <DIR>          Analyse a music folder into the cache, then exit
+  --scan [DIR]          Analyse a music folder into the cache, then exit
+                        (no DIR: uses [library] folders from config.toml)
   --audio <FILE>        Track to analyse and dance to (cached after the first run)
   --score <FILE.json>   Use this beat grid instead of analysing
   --models <DIR>        ONNX weights directory (default: <data dir>/models)
@@ -81,6 +89,13 @@ your music first:
   --stale <SECS>        Report positions this many seconds old
   -h, --help            This text
 ";
+
+impl Args {
+    /// Did the user ask for a scan, whether or not they named a folder?
+    pub fn scan_requested(&self) -> bool {
+        self.scan_flag
+    }
+}
 
 pub fn parse<I: Iterator<Item = String>>(args: I) -> Result<Args, String> {
     let mut out = Args::default();
@@ -98,7 +113,13 @@ pub fn parse<I: Iterator<Item = String>>(args: I) -> Result<Args, String> {
             "--no-cache" => out.no_cache = true,
             "--no-anticipate" => out.no_anticipate = true,
             "--no-smtc" => out.no_smtc = true,
-            "--scan" => out.scan.push(PathBuf::from(value("--scan")?)),
+            "--scan" => {
+                out.scan_flag = true;
+                // The value is optional, so it must not swallow the next flag.
+                if it.peek().is_some_and(|v| !v.starts_with('-')) {
+                    out.scan.push(PathBuf::from(it.next().expect("peeked")));
+                }
+            }
             "--no-fetch" => out.no_fetch = true,
             "--write-config" => out.write_config = true,
             "--yandex-login" => out.yandex_login = true,
@@ -161,6 +182,31 @@ mod tests {
         let a = parse_str("flchan/Dance_Large.png --check-sheet").unwrap();
         assert!(a.check_sheet);
         assert_eq!(a.sheet, Some(PathBuf::from("flchan/Dance_Large.png")));
+    }
+
+    #[test]
+    fn scan_takes_a_folder_or_none_at_all() {
+        let named = parse_str("--scan D:/music --scan E:/more").unwrap();
+        assert!(named.scan_requested());
+        assert_eq!(named.scan.len(), 2);
+
+        // Bare `--scan` means "use the configured folders", which is a request in
+        // its own right and must not read as "no scan".
+        let bare = parse_str("--scan").unwrap();
+        assert!(bare.scan_requested());
+        assert!(bare.scan.is_empty());
+
+        assert!(!parse_str("sheet.png").unwrap().scan_requested());
+    }
+
+    #[test]
+    fn scan_does_not_swallow_the_flag_after_it() {
+        // The regression an optional positional invites: `--scan --no-cache` must
+        // not treat `--no-cache` as a folder name.
+        let a = parse_str("--scan --no-cache").unwrap();
+        assert!(a.scan_requested());
+        assert!(a.scan.is_empty(), "took {:?} as a folder", a.scan);
+        assert!(a.no_cache);
     }
 
     #[test]
