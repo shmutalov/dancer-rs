@@ -65,6 +65,8 @@ pub const SOURCE: &str = "yandex";
 pub enum YandexError {
     #[error("no OAuth token configured")]
     NoToken,
+    #[error("the stored Yandex token is no longer valid")]
+    TokenRejected,
     #[error("yandex api: {0}")]
     Api(String),
     #[error("no match for {title} — {artist}")]
@@ -114,6 +116,26 @@ impl Drop for TempAudio {
     }
 }
 
+/// Who a token belongs to, for showing in the UI.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Account {
+    pub login: String,
+    pub uid: Option<i64>,
+    /// Whether Yandex Music is available to this account at all.
+    pub service_available: bool,
+}
+
+impl Account {
+    /// What to show when naming the signed-in account.
+    pub fn display(&self) -> String {
+        if self.login.trim().is_empty() {
+            "signed in".to_string()
+        } else {
+            self.login.clone()
+        }
+    }
+}
+
 pub struct Yandex {
     client: Client,
     /// Where temporary audio lands. Cleared per track, never accumulated.
@@ -130,6 +152,45 @@ impl Yandex {
             .build()
             .map_err(|e| YandexError::Api(e.to_string()))?;
         Ok(Self { client, scratch })
+    }
+
+    /// Ask Yandex whether the token is still good, and who it belongs to.
+    ///
+    /// # Why this runs at startup rather than on first use
+    ///
+    /// OAuth tokens expire, and they are also revoked from the account page — which
+    /// is exactly what a user does after reading that the token sits in a plain-text
+    /// config. Discovering that lazily means the failure surfaces halfway through a
+    /// track, as a fetch that quietly does not happen, with a dancer that carries on
+    /// looking fine. Checking up front turns it into something that can be said
+    /// plainly and fixed in one click.
+    ///
+    /// Deliberately the cheapest authenticated call there is. This runs on every
+    /// start, so it must cost one small request and must never be the reason the
+    /// dancer is slow to appear.
+    pub async fn verify(&self) -> Result<Account, YandexError> {
+        let status = self.client.account_status().await.map_err(|e| {
+            let text = e.to_string();
+            // A rejected token and an unreachable network are the same shape of
+            // error here and must not be treated alike: one wants a sign-in
+            // prompt, the other wants leaving alone until the network returns.
+            if text.contains("nauthorized") || text.contains("401") {
+                YandexError::TokenRejected
+            } else {
+                YandexError::Api(text)
+            }
+        })?;
+
+        let account = status.account.unwrap_or_default();
+        Ok(Account {
+            login: account.login.unwrap_or_default(),
+            uid: account.uid,
+            // `service_available` is the account's own answer to "can this account
+            // use Yandex Music at all". A valid token on an account without the
+            // service is a real state, and it fails later at the download rather
+            // than at the search, which is the confusing place to find out.
+            service_available: account.service_available.unwrap_or(true),
+        })
     }
 
     /// Find the Yandex track that best matches what SMTC reported.

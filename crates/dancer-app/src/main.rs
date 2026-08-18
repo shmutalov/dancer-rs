@@ -33,12 +33,15 @@ use winit::window::{Window, WindowId, WindowLevel};
 use windows::Win32::Foundation::{HWND, POINT};
 use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 
+mod account;
 mod cli;
 mod config;
 mod console;
+mod dialog;
 mod events;
 mod library;
 mod playback;
+mod sheets;
 mod tray;
 mod watch;
 
@@ -252,6 +255,9 @@ fn main() -> anyhow::Result<()> {
         tray_shown: None,
         watch,
         sheet_path,
+        sheets: Vec::new(),
+        account: account::Status::Off,
+        account_ch: account::Channel::new(),
     };
     event_loop.run_app(&mut app)?;
     Ok(())
@@ -339,7 +345,7 @@ fn run_yandex_login(_cfg: Config, _dir: &Path) -> anyhow::Result<()> {
 
 /// A name the user will recognise in their Yandex device list.
 #[cfg(feature = "yandex")]
-fn hostname() -> Option<String> {
+pub(crate) fn hostname() -> Option<String> {
     std::env::var("COMPUTERNAME")
         .ok()
         .filter(|s| !s.trim().is_empty())
@@ -698,8 +704,13 @@ struct App {
     watch: Option<watch::Watch>,
     /// Path the sheet was loaded from, so a reload knows what to re-read.
     sheet_path: PathBuf,
+    /// Sheets found in the artwork folder, as the tray lists them.
+    sheets: Vec<PathBuf>,
+    /// Yandex sign-in state, and the channel the worker reports through.
+    account: account::Status,
+    account_ch: account::Channel,
     /// What the tray menu was last told, so it is only rewritten on change.
-    tray_shown: Option<(String, Option<String>, bool, bool, bool, i64)>,
+    tray_shown: Option<tray::State>,
 }
 
 impl App {
@@ -767,14 +778,19 @@ impl App {
             return;
         };
 
+        // Rescanned on every build, so a sheet dropped into the folder appears
+        // after any action that rebuilds the tray rather than only after a restart.
+        self.sheets = sheets::list(&self.artwork_dir());
+        let names: Vec<String> = self.sheets.iter().map(|p| sheets::label(p)).collect();
+        let current = self.sheets.iter().position(|p| *p == self.sheet_path);
+
         match tray::Tray::new(
             &cell,
             self.sheet.cell_width,
             self.sheet.cell_height,
-            self.cfg.window.click_through,
-            self.cfg.window.always_on_top,
-            self.playback.anticipating(),
-            self.cfg.playback.offset_secs,
+            &self.tray_state(),
+            &names,
+            current,
         ) {
             Ok(t) => {
                 tracing::info!("tray ready");
@@ -819,7 +835,15 @@ impl App {
                 }
                 tray::Action::NudgeOffset(by) => self.set_offset(self.cfg.playback.offset_secs + by),
                 tray::Action::ResetOffset => self.set_offset(config::Playback::default_offset()),
-                tray::Action::OpenDataDir => tray::open_dir(&self.dir),
+                tray::Action::OpenDataDir => dialog::open_dir(&self.dir),
+                tray::Action::OpenArtworkDir => dialog::open_dir(&self.artwork_dir()),
+                tray::Action::SheetHelp => self.show_sheet_help(),
+                tray::Action::SelectSheet(i) => self.select_sheet(i),
+                tray::Action::YandexSignIn => {
+                    self.account = account::Status::Checking;
+                    account::sign_in(self.account_ch.tx.clone());
+                    self.tray_shown = None;
+                }
                 tray::Action::Quit => {
                     self.quit(el);
                     return;
@@ -846,43 +870,6 @@ impl App {
         if let Err(e) = self.cfg.save(&self.dir) {
             tracing::warn!(error = %e, "could not save the offset");
         }
-    }
-
-    /// Push current state into the tray menu, if anything it shows has changed.
-    fn refresh_tray(&mut self) {
-        let Some(tray) = self.tray.as_ref() else {
-            return;
-        };
-        let track = self.playback.track.as_ref().map(|t| {
-            if t.artist.is_empty() {
-                t.title.clone()
-            } else {
-                format!("{} — {}", t.artist, t.title)
-            }
-        });
-        // Compared before writing because `set_text` crosses into the shell, and a
-        // menu rewritten every 8 ms is both wasteful and capable of flickering an
-        // open menu.
-        let now = (
-            self.playback.state.name().to_string(),
-            track,
-            self.cfg.window.click_through,
-            self.cfg.window.always_on_top,
-            self.playback.anticipating(),
-            (self.cfg.playback.offset_secs * 1000.0).round() as i64,
-        );
-        if self.tray_shown.as_ref() == Some(&now) {
-            return;
-        }
-        tray.refresh(
-            &now.0,
-            now.1.as_deref(),
-            now.2,
-            now.3,
-            now.4,
-            self.cfg.playback.offset_secs,
-        );
-        self.tray_shown = Some(now);
     }
 
     /// Re-read whatever changed on disk (ROADMAP M5).
@@ -1011,6 +998,207 @@ impl App {
             let _ = win.request_inner_size(PhysicalSize::new(w, h));
         }
         self.draw();
+    }
+
+    /// Where sheets live (spec §13's `artwork_dir`).
+    fn artwork_dir(&self) -> PathBuf {
+        let art = Path::new(&self.cfg.sprite.artwork_dir);
+        if art.is_absolute() {
+            art.to_path_buf()
+        } else {
+            self.dir.join(art)
+        }
+    }
+
+    /// Switch to another sheet from the tray.
+    ///
+    /// Written to the config immediately, because picking a dancer is a preference
+    /// and not a session setting — the surprise would be it reverting on restart.
+    fn select_sheet(&mut self, index: usize) {
+        let Some(path) = self.sheets.get(index).cloned() else {
+            return;
+        };
+        if path == self.sheet_path {
+            return;
+        }
+
+        // Relative when it sits in the artwork folder, so a config written here
+        // stays portable if the whole folder moves.
+        self.cfg.sprite.sheet = match path.strip_prefix(self.artwork_dir()) {
+            Ok(rel) => rel.to_string_lossy().into_owned(),
+            Err(_) => path.to_string_lossy().into_owned(),
+        };
+        self.sheet_path = path;
+        if let Some(w) = self.watch.as_mut() {
+            w.set_sheet(&self.sheet_path);
+        }
+        self.reload_sheet();
+        if let Err(e) = self.cfg.save(&self.dir) {
+            tracing::warn!(error = %e, "could not save the chosen sheet");
+        }
+        // The tick moves to the new sheet, and the icon is cut from it.
+        self.rebuild_tray();
+    }
+
+    /// Throw the tray away and build it again.
+    ///
+    /// `muda` menus are built once, so anything that changes their *shape* — the
+    /// list of sheets, which one is ticked, the icon — is a rebuild rather than an
+    /// update. Cheap, and it happens only on an explicit user action.
+    fn rebuild_tray(&mut self) {
+        self.tray = None;
+        self.tray_shown = None;
+        self.build_tray();
+    }
+
+    /// Explain where dancers come from, on a worker thread so the dancer keeps going.
+    fn show_sheet_help(&self) {
+        let dir = self.artwork_dir();
+        std::thread::spawn(move || {
+            dialog::info(
+                "Adding dancers",
+                &format!(
+                    "A dancer is a sprite sheet: one PNG that is 8 cells wide, with \
+                     one row per animation, plus a .txt naming those rows one per line.\n\n\
+                     The format comes from FAOSDance and Fruity Dance, so sheets made \
+                     for either will work here.\n\n\
+                     To add one:\n\n\
+                     1. Put the .png and its .txt in\n     {}\n\
+                     2. Pick it from the tray under Dancer.\n\n\
+                     For it to dance in time rather than just loop, add a .toml beside \
+                     the PNG saying which cell is each move's accent. See default.toml \
+                     in that folder for a worked example, and check your work with:\n\n\
+                          dancer-rs.exe <sheet.png> --check-sheet",
+                    dir.display()
+                ),
+            );
+        });
+    }
+
+    /// Fold in whatever the Yandex worker learned.
+    fn drain_account(&mut self) {
+        while let Ok(ev) = self.account_ch.rx.try_recv() {
+            match ev {
+                account::AccountEvent::Valid { login } => {
+                    tracing::info!(login, "yandex token ok");
+                    self.account = account::Status::Ok(login);
+                }
+                account::AccountEvent::Unknown(why) => {
+                    // Explicitly *not* a prompt. A network blip is not a reason to
+                    // ask someone to sign in again, and treating it as one trains
+                    // people to dismiss the dialog that matters.
+                    tracing::warn!(why, "could not check the yandex token");
+                    self.account = account::Status::Unavailable;
+                }
+                account::AccountEvent::Rejected => {
+                    tracing::warn!("yandex token rejected");
+                    self.account = account::Status::Rejected;
+                    self.offer_sign_in();
+                }
+                account::AccountEvent::SignedIn { token, login } => {
+                    self.cfg.source.yandex.token = token;
+                    // Signing in *is* the request; there is nothing left to opt into.
+                    self.cfg.source.yandex.fetch_for_analysis = true;
+                    if let Err(e) = self.cfg.save(&self.dir) {
+                        tracing::warn!(error = %e, "could not save the token");
+                    }
+                    tracing::info!(login, "signed in to yandex");
+                    self.account = account::Status::Ok(login.clone());
+                    let dir = self.dir.clone();
+                    std::thread::spawn(move || {
+                        dialog::info(
+                            "Signed in to Yandex Music",
+                            &format!(
+                                "Signed in as {login}.\n\n\
+                                 Streamed tracks will now be fetched, analysed and \
+                                 deleted immediately — only the beat grid is kept.\n\n\
+                                 The token is stored in plain text in\n     {}\n\n\
+                                 Revoke it any time at {}",
+                                dir.join("config.toml").display(),
+                                account::REVOKE_URL
+                            ),
+                        );
+                    });
+                }
+                account::AccountEvent::SignInFailed(why) => {
+                    tracing::warn!(why, "yandex sign-in did not complete");
+                    // Back to whatever it was: a failed *new* sign-in does not
+                    // invalidate a token that was already working.
+                    if !matches!(self.account, account::Status::Ok(_)) {
+                        self.account = account::Status::Off;
+                    }
+                    std::thread::spawn(move || {
+                        dialog::error(
+                            "Sign-in did not complete",
+                            &format!(
+                                "{why}\n\nNothing has changed. You can try again from \
+                                 the tray menu whenever you like — the dancer works \
+                                 without it, it just cannot analyse streamed tracks."
+                            ),
+                        );
+                    });
+                }
+            }
+        }
+    }
+
+    /// Ask whether to sign in again, after a token turned out to be dead.
+    ///
+    /// A question rather than a prompt that starts the flow: the feature is opt-in,
+    /// and someone who revoked their token on purpose should not be walked back into
+    /// authorising a new one by dismissing a dialog.
+    fn offer_sign_in(&mut self) {
+        let tx = self.account_ch.tx.clone();
+        std::thread::spawn(move || {
+            let yes = dialog::confirm(
+                "Yandex sign-in expired",
+                "The saved Yandex Music sign-in is no longer valid — it has expired \
+                 or been revoked.\n\n\
+                 Until you sign in again, streamed tracks cannot be analysed and the \
+                 dancer will loop at a fixed rate for them. Everything else keeps \
+                 working.\n\n\
+                 Sign in again now?",
+            );
+            if yes {
+                account::sign_in(tx);
+            }
+        });
+    }
+
+    /// What the tray should be showing right now.
+    fn tray_state(&self) -> tray::State {
+        tray::State {
+            state: self.playback.state.name().to_string(),
+            track: self.playback.track.as_ref().map(|t| {
+                if t.artist.is_empty() {
+                    t.title.clone()
+                } else {
+                    format!("{} — {}", t.artist, t.title)
+                }
+            }),
+            click_through: self.cfg.window.click_through,
+            always_on_top: self.cfg.window.always_on_top,
+            anticipate: self.playback.anticipating(),
+            offset_secs: self.cfg.playback.offset_secs,
+            yandex: account::status_line(&self.account),
+        }
+    }
+
+    /// Push current state into the tray menu, if anything it shows has changed.
+    ///
+    /// Compared before writing because `set_text` crosses into the shell, and a menu
+    /// rewritten every 8 ms is both wasteful and capable of flickering one that is
+    /// open.
+    fn refresh_tray(&mut self) {
+        let Some(tray) = self.tray.as_ref() else {
+            return;
+        };
+        let now = self.tray_state();
+        if self.tray_shown.as_ref() == Some(&now) {
+            return;
+        }
+        tray.refresh(&now);
+        self.tray_shown = Some(now);
     }
 
     /// Save and exit. The one path out, however it was asked for.
@@ -1283,6 +1471,14 @@ impl ApplicationHandler for App {
         // has to be pumped by this loop.
         self.build_tray();
 
+        // Checked at startup rather than at first use. A dead token otherwise
+        // surfaces mid-track as a fetch that quietly does not happen, behind a
+        // dancer that carries on looking fine — see `account`.
+        if !self.cfg.source.yandex.token.trim().is_empty() {
+            self.account = account::Status::Checking;
+            account::verify(self.cfg.source.yandex.token.clone(), self.account_ch.tx.clone());
+        }
+
         self.next_frame = Instant::now() + self.frame_interval();
         el.set_control_flow(ControlFlow::WaitUntil(self.next_frame));
     }
@@ -1326,6 +1522,7 @@ impl ApplicationHandler for App {
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
         self.drain_events();
         self.drain_watch();
+        self.drain_account();
         self.drain_tray(el);
         if el.exiting() {
             return;

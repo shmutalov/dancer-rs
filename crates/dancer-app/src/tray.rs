@@ -13,9 +13,7 @@
 //! glance *which sheet is loaded* — which starts to matter once artwork hot-reloads
 //! and there is more than one sheet to choose between.
 
-use std::path::Path;
-
-use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
+use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
 /// What the user asked for.
@@ -31,6 +29,13 @@ pub enum Action {
     NudgeOffset(f64),
     ResetOffset,
     OpenDataDir,
+    /// Switch to the sheet at this index of the list the tray was built with.
+    SelectSheet(usize),
+    OpenArtworkDir,
+    /// Show the "where do dancers come from" help.
+    SheetHelp,
+    /// Start the Yandex OAuth device flow.
+    YandexSignIn,
     Quit,
 }
 
@@ -43,6 +48,23 @@ pub enum Action {
 pub const NUDGE_FINE: f64 = 0.005;
 pub const NUDGE_COARSE: f64 = 0.025;
 
+/// Everything the menu displays, in one value.
+///
+/// Six positional booleans and floats passed twice — once to build, once to
+/// refresh — is a swap waiting to happen, and `click_through` and `always_on_top`
+/// are the same type in adjacent positions. It doubles as the change-detection key,
+/// so the menu is only rewritten when something it shows actually differs.
+#[derive(Debug, Clone, PartialEq)]
+pub struct State {
+    pub state: String,
+    pub track: Option<String>,
+    pub click_through: bool,
+    pub always_on_top: bool,
+    pub anticipate: bool,
+    pub offset_secs: f64,
+    pub yandex: String,
+}
+
 pub struct Tray {
     // Held so the icon lives as long as the app: dropping it removes it from the
     // tray. Never read directly.
@@ -52,6 +74,7 @@ pub struct Tray {
     click_through: CheckMenuItem,
     always_on_top: CheckMenuItem,
     anticipate: CheckMenuItem,
+    yandex: MenuItem,
     ids: Ids,
 }
 
@@ -65,6 +88,11 @@ struct Ids {
     plus_coarse: MenuId,
     reset_offset: MenuId,
     open_dir: MenuId,
+    /// One per entry of the sheet list, in the order it was given.
+    sheets: Vec<MenuId>,
+    open_artwork: MenuId,
+    sheet_help: MenuId,
+    yandex_sign_in: MenuId,
     quit: MenuId,
 }
 
@@ -75,21 +103,20 @@ impl Tray {
         cell: &[u32],
         width: u32,
         height: u32,
-        click_through: bool,
-        always_on_top: bool,
-        anticipate: bool,
-        offset_secs: f64,
+        now: &State,
+        sheets: &[String],
+        current_sheet: Option<usize>,
     ) -> anyhow::Result<Self> {
         let menu = Menu::new();
 
         // Disabled items used as labels. `muda` has no dedicated label widget, and
         // a disabled item is how every other tray application does this.
-        let status = MenuItem::new("Idle", false, None);
-        let offset_label = MenuItem::new(offset_text(offset_secs), false, None);
+        let status = MenuItem::new(&now.state, false, None);
+        let offset_label = MenuItem::new(offset_text(now.offset_secs), false, None);
 
-        let click_through_item = CheckMenuItem::new("Click-through", true, click_through, None);
-        let always_on_top_item = CheckMenuItem::new("Always on top", true, always_on_top, None);
-        let anticipate_item = CheckMenuItem::new("Anticipate the beat", true, anticipate, None);
+        let click_through_item = CheckMenuItem::new("Click-through", true, now.click_through, None);
+        let always_on_top_item = CheckMenuItem::new("Always on top", true, now.always_on_top, None);
+        let anticipate_item = CheckMenuItem::new("Anticipate the beat", true, now.anticipate, None);
 
         let minus_coarse = MenuItem::new("Offset  -25 ms", true, None);
         let minus_fine = MenuItem::new("Offset   -5 ms", true, None);
@@ -99,6 +126,31 @@ impl Tray {
 
         let open_dir = MenuItem::new("Open data folder", true, None);
         let quit = MenuItem::new("Quit", true, None);
+
+        // Radio behaviour by hand: `muda` has no radio item, and a check item per
+        // sheet with exactly one ticked reads the same way.
+        let dancers = Submenu::new("Dancer", true);
+        let mut sheet_items = Vec::with_capacity(sheets.len());
+        for (i, name) in sheets.iter().enumerate() {
+            let item = CheckMenuItem::new(name, true, Some(i) == current_sheet, None);
+            dancers.append(&item)?;
+            sheet_items.push(item);
+        }
+        if sheets.is_empty() {
+            // Never an empty submenu: an empty one looks broken, whereas a line
+            // saying what is missing points at the fix.
+            dancers.append(&MenuItem::new("No sheets in the artwork folder", false, None))?;
+        }
+        let open_artwork = MenuItem::new("Open artwork folder", true, None);
+        let sheet_help = MenuItem::new("How to add dancers...", true, None);
+        dancers.append_items(&[
+            &PredefinedMenuItem::separator(),
+            &open_artwork,
+            &sheet_help,
+        ])?;
+
+        let yandex_item = MenuItem::new(&now.yandex, false, None);
+        let yandex_sign_in = MenuItem::new("Sign in to Yandex Music...", true, None);
 
         let ids = Ids {
             click_through: click_through_item.id().clone(),
@@ -110,11 +162,17 @@ impl Tray {
             plus_coarse: plus_coarse.id().clone(),
             reset_offset: reset_offset.id().clone(),
             open_dir: open_dir.id().clone(),
+            sheets: sheet_items.iter().map(|i| i.id().clone()).collect(),
+            open_artwork: open_artwork.id().clone(),
+            sheet_help: sheet_help.id().clone(),
+            yandex_sign_in: yandex_sign_in.id().clone(),
             quit: quit.id().clone(),
         };
 
         menu.append_items(&[
             &status,
+            &PredefinedMenuItem::separator(),
+            &dancers,
             &PredefinedMenuItem::separator(),
             &click_through_item,
             &always_on_top_item,
@@ -126,6 +184,9 @@ impl Tray {
             &plus_fine,
             &plus_coarse,
             &reset_offset,
+            &PredefinedMenuItem::separator(),
+            &yandex_item,
+            &yandex_sign_in,
             &PredefinedMenuItem::separator(),
             &open_dir,
             &quit,
@@ -144,6 +205,7 @@ impl Tray {
             click_through: click_through_item,
             always_on_top: always_on_top_item,
             anticipate: anticipate_item,
+            yandex: yandex_item,
             ids,
         })
     }
@@ -171,6 +233,14 @@ impl Tray {
                 Action::ResetOffset
             } else if *id == self.ids.open_dir {
                 Action::OpenDataDir
+            } else if *id == self.ids.open_artwork {
+                Action::OpenArtworkDir
+            } else if *id == self.ids.sheet_help {
+                Action::SheetHelp
+            } else if *id == self.ids.yandex_sign_in {
+                Action::YandexSignIn
+            } else if let Some(i) = self.ids.sheets.iter().position(|s| s == id) {
+                Action::SelectSheet(i)
             } else if *id == self.ids.quit {
                 Action::Quit
             } else {
@@ -186,37 +256,21 @@ impl Tray {
     /// The checkboxes are set from the application rather than toggled by the menu
     /// itself. `click_through` can fail to apply, and a checkbox reporting what was
     /// *asked for* rather than what happened is worse than no checkbox.
-    pub fn refresh(
-        &self,
-        state: &str,
-        track: Option<&str>,
-        click_through: bool,
-        always_on_top: bool,
-        anticipate: bool,
-        offset_secs: f64,
-    ) {
-        self.status.set_text(match track {
-            Some(t) => format!("{state} — {t}"),
-            None => state.to_string(),
+    pub fn refresh(&self, now: &State) {
+        self.yandex.set_text(&now.yandex);
+        self.status.set_text(match &now.track {
+            Some(t) => format!("{} — {t}", now.state),
+            None => now.state.clone(),
         });
-        self.offset_label.set_text(offset_text(offset_secs));
-        self.click_through.set_checked(click_through);
-        self.always_on_top.set_checked(always_on_top);
-        self.anticipate.set_checked(anticipate);
+        self.offset_label.set_text(offset_text(now.offset_secs));
+        self.click_through.set_checked(now.click_through);
+        self.always_on_top.set_checked(now.always_on_top);
+        self.anticipate.set_checked(now.anticipate);
     }
 }
 
 fn offset_text(secs: f64) -> String {
     format!("Output offset: {:+.0} ms", secs * 1000.0)
-}
-
-/// Open a folder in the system file manager.
-pub fn open_dir(dir: &Path) {
-    // `explorer` returns a non-zero exit code even on success, so its status is
-    // deliberately not checked — only a spawn failure is worth reporting.
-    if let Err(e) = std::process::Command::new("explorer").arg(dir.as_os_str()).spawn() {
-        tracing::warn!(error = %e, dir = %dir.display(), "could not open the data folder");
-    }
 }
 
 /// Turn one premultiplied-BGRA sprite cell into a tray icon.
