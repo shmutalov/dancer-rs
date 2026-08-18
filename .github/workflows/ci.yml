@@ -1,0 +1,79 @@
+# Build and test on every push.
+#
+# Windows only, and GNU only, because that is the only configuration this project
+# claims to work in: the MSVC target needs the ~2 GB Windows SDK, which is not
+# installed on the author's machine and is not something CI should be the first to
+# discover a difference from (see rust-toolchain.toml and ROADMAP §0.4).
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # A backtrace from CI is the only backtrace anyone gets, since nobody is sitting
+  # at the machine when it fails.
+  RUST_BACKTRACE: 1
+
+jobs:
+  test:
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml pins stable-x86_64-pc-windows-gnu, and rustup installs
+      # it on first use. Doing it as its own step means a toolchain problem reads as
+      # a toolchain problem rather than as a mysterious build failure.
+      - name: Install the pinned toolchain
+        shell: pwsh
+        run: |
+          rustup show active-toolchain
+          rustc --version
+          cargo --version
+
+      # rusqlite is built from source (`bundled`), so a C compiler is required, and
+      # the GNU target wants gcc specifically. rustup's rust-mingw component supplies
+      # a linker but not a compiler. The runner image ships MSYS2; find it rather
+      # than assume its path, and say so loudly if it is gone.
+      - name: Put MinGW gcc on PATH
+        shell: pwsh
+        run: |
+          $roots = 'C:\msys64\mingw64\bin', 'C:\mingw64\bin', 'C:\ProgramData\mingw64\mingw64\bin'
+          $found = $roots | Where-Object { Test-Path (Join-Path $_ 'gcc.exe') } | Select-Object -First 1
+          if (-not $found) {
+            Write-Host 'no MinGW on the image; installing'
+            choco install mingw -y --no-progress
+            $found = $roots | Where-Object { Test-Path (Join-Path $_ 'gcc.exe') } | Select-Object -First 1
+          }
+          if (-not $found) { throw 'no gcc: rusqlite cannot be built' }
+          Add-Content -Path $env:GITHUB_PATH -Value $found -Encoding utf8
+          & (Join-Path $found 'gcc.exe') --version
+
+      # First-party cache action rather than a third-party one. This is a public repo
+      # cutting public binaries; every action in the chain is code that runs with a
+      # write token, and the shorter that list the better.
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-${{ runner.os }}-gnu-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: cargo-${{ runner.os }}-gnu-
+
+      - name: Test
+        run: cargo test --workspace
+
+      # Deliberately not `-D warnings`. Eleven warnings predate this workflow, so a
+      # failing gate would be red from its first run and read as noise within a day.
+      # It still fails on clippy *errors*, and the warnings are in the log for
+      # whoever clears them; tighten this the commit after they are gone.
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets

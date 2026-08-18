@@ -1,0 +1,159 @@
+# Cut a release from a tag.
+#
+# Push `v0.1.0` and this builds the package the same way `packaging/build-release.ps1`
+# does on a workstation -- same script, so there is one definition of what a release
+# contains and CI cannot drift from it -- then attaches the zip to a GitHub release.
+#
+# There is no cross-compilation and no matrix. The app is Win32 to its bones:
+# UpdateLayeredWindow, SMTC, a Windows tray. One artefact, one target.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  # Re-running a release by hand, e.g. after fixing a packaging bug, without
+  # deleting and re-pushing the tag.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to package (e.g. v0.1.0)'
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  package:
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Resolve the version
+        id: v
+        shell: pwsh
+        run: |
+          $tag = if ($env:INPUT_TAG) { $env:INPUT_TAG } else { $env:GITHUB_REF -replace '^refs/tags/', '' }
+          $version = (Select-String -Path 'Cargo.toml' -Pattern '^version\s*=\s*"(.+)"').Matches[0].Groups[1].Value
+
+          # The package is named from Cargo.toml and the release from the tag. If
+          # they disagree, the release is called one thing and contains another, so
+          # stop here rather than publish that.
+          if ($tag -ne "v$version") {
+            throw "tag $tag does not match workspace version $version -- expected v$version"
+          }
+
+          "tag=$tag"         | Add-Content $env:GITHUB_OUTPUT
+          "version=$version" | Add-Content $env:GITHUB_OUTPUT
+          "name=dancer-rs-$version" | Add-Content $env:GITHUB_OUTPUT
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+
+      - name: Install the pinned toolchain
+        shell: pwsh
+        run: |
+          rustup show active-toolchain
+          rustc --version
+
+      - name: Put MinGW gcc on PATH
+        shell: pwsh
+        run: |
+          $roots = 'C:\msys64\mingw64\bin', 'C:\mingw64\bin', 'C:\ProgramData\mingw64\mingw64\bin'
+          $found = $roots | Where-Object { Test-Path (Join-Path $_ 'gcc.exe') } | Select-Object -First 1
+          if (-not $found) {
+            choco install mingw -y --no-progress
+            $found = $roots | Where-Object { Test-Path (Join-Path $_ 'gcc.exe') } | Select-Object -First 1
+          }
+          if (-not $found) { throw 'no gcc: rusqlite cannot be built' }
+          Add-Content -Path $env:GITHUB_PATH -Value $found -Encoding utf8
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-${{ runner.os }}-gnu-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: cargo-${{ runner.os }}-gnu-
+
+      # The weights are pinned by SHA-256 inside the packaging script, so a cache hit
+      # and a fresh download are interchangeable -- a corrupt or swapped file fails
+      # the checksum either way.
+      - name: Cache the ONNX weights
+        uses: actions/cache@v4
+        with:
+          path: models
+          key: models-${{ hashFiles('packaging/build-release.ps1') }}
+
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Package
+        shell: pwsh
+        run: ./packaging/build-release.ps1
+
+      # An independent check on what is about to be published. The script copies
+      # assets by name precisely so a sheet dropped in the folder cannot be swept
+      # into a release (spec 1.3) -- this asserts the outcome rather than trusting
+      # the method, because the cost of being wrong is redistributing somebody
+      # else's artwork under our name.
+      - name: Check the package contains only what it should
+        shell: pwsh
+        run: |
+          $zip = "dist/${{ steps.v.outputs.name }}.zip"
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $entries = [IO.Compression.ZipFile]::OpenRead((Resolve-Path $zip)).Entries.FullName
+          $entries | ForEach-Object { "  $_" }
+
+          $allowed = @(
+            'dancer-rs.exe', 'LICENSE', 'README.txt',
+            'assets/default.png', 'assets/default.txt', 'assets/default.toml',
+            'models/mel_spectrogram.onnx', 'models/beat_this_small.onnx'
+          )
+          $unexpected = $entries |
+            Where-Object { -not $_.EndsWith('/') } |
+            ForEach-Object { $_ -replace '\', '/' } |
+            Where-Object { $allowed -notcontains $_ }
+          if ($unexpected) { throw "unexpected files in the package:`n  $($unexpected -join "`n  ")" }
+          Write-Host 'package contents ok' -ForegroundColor Green
+
+      - name: Checksum
+        shell: pwsh
+        run: |
+          $zip = "dist/${{ steps.v.outputs.name }}.zip"
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+          "$hash  ${{ steps.v.outputs.name }}.zip" | Set-Content "$zip.sha256" -Encoding ascii
+          Write-Host $hash
+
+      # `gh` rather than a third-party release action, for the same reason as the
+      # cache: this step holds a token that can write to the repository.
+      #
+      # The body lives in packaging/release-notes.md rather than inline here, so it
+      # can be read and edited as prose instead of as a quoted string inside YAML
+      # inside PowerShell.
+      - name: Publish
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $name = '${{ steps.v.outputs.name }}'
+          $tag  = '${{ steps.v.outputs.tag }}'
+          (Get-Content packaging/release-notes.md -Raw).Replace('PACKAGE', $name) |
+            Set-Content notes.md -Encoding utf8
+
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag "dist/$name.zip" "dist/$name.zip.sha256" --clobber
+          } else {
+            gh release create $tag "dist/$name.zip" "dist/$name.zip.sha256" `
+              --title $name --notes-file notes.md --generate-notes
+          }

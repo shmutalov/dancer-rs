@@ -8,7 +8,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
-repository = "https://github.com/shmutalov/dancing-rs"
+repository = "https://github.com/shmutalov/dancer-rs"
 
 [workspace.dependencies]
 anyhow = "1"
