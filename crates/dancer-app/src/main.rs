@@ -285,42 +285,14 @@ fn build_troupe(
     let jitter = cfg.dancers.jitter();
     let mut rng = XorShift::new(seed);
 
-    // Candidates for dancers beyond the first: the named list, or the folder.
-    // Names resolve against the same scan the tray shows, matched by that menu's
-    // own labels — `PolishCow` finds `assets/polish-cow/PolishCow.png`, and
-    // `polish-cow/PolishCow` names it exactly.
-    let artwork = artwork_dir_of(cfg, dir);
-    let scanned = sheets::list(&artwork);
-    let pool: Vec<PathBuf> = if cfg.dancers.sheets.is_empty() {
-        scanned
-    } else {
-        cfg.dancers
-            .sheets
-            .iter()
-            .filter_map(|name| {
-                let hit = scanned.iter().find(|p| {
-                    sheets::label_in(&artwork, p).eq_ignore_ascii_case(name)
-                        || sheets::label(p).eq_ignore_ascii_case(name)
-                });
-                if hit.is_none() {
-                    tracing::warn!(name, "no such sheet in the artwork folder; skipping");
-                }
-                hit.cloned()
-            })
-            .collect()
-    };
+    let pool = troupe_pool(cfg, &artwork_dir_of(cfg, dir));
 
     let mut out = Vec::with_capacity(count);
     for i in 0..count {
         let (sheet_i, path_i) = if i == 0 {
             (sheet.clone(), sheet_path.clone())
         } else {
-            let want = if cfg.dancers.sheets.is_empty() {
-                // Random from the folder. The folder can be empty; fall through.
-                pool.get((rng.next() as usize) % pool.len().max(1)).cloned()
-            } else {
-                pool.get(i % pool.len()).cloned()
-            };
+            let want = pick_pool_sheet(cfg, &pool, i, &mut rng);
             match want.map(|p| (Sheet::load(&p), p)) {
                 Some((Ok(s), p)) => (s, p),
                 Some((Err(e), p)) => {
@@ -358,6 +330,45 @@ fn build_troupe(
         out.push(dancer::Dancer::new(sheet_i, path_i, playback, scale));
     }
     out
+}
+
+/// Candidates for dancers beyond the first: the named list, or the folder.
+///
+/// Names resolve against the same scan the tray shows, matched by that menu's
+/// own labels — `PolishCow` finds `assets/polish-cow/PolishCow.png`, and
+/// `polish-cow/PolishCow` names it exactly.
+fn troupe_pool(cfg: &Config, artwork: &Path) -> Vec<PathBuf> {
+    let scanned = sheets::list(artwork);
+    if cfg.dancers.sheets.is_empty() {
+        return scanned;
+    }
+    cfg.dancers
+        .sheets
+        .iter()
+        .filter_map(|name| {
+            let hit = scanned.iter().find(|p| {
+                sheets::label_in(artwork, p).eq_ignore_ascii_case(name)
+                    || sheets::label(p).eq_ignore_ascii_case(name)
+            });
+            if hit.is_none() {
+                tracing::warn!(name, "no such sheet in the artwork folder; skipping");
+            }
+            hit.cloned()
+        })
+        .collect()
+}
+
+/// Which pool entry dancer `i` wears: the named list cycles, an unnamed pool is
+/// drawn from at random.
+fn pick_pool_sheet(cfg: &Config, pool: &[PathBuf], i: usize, rng: &mut XorShift) -> Option<PathBuf> {
+    if pool.is_empty() {
+        return None;
+    }
+    if cfg.dancers.sheets.is_empty() {
+        pool.get((rng.next() as usize) % pool.len()).cloned()
+    } else {
+        pool.get(i % pool.len()).cloned()
+    }
 }
 
 /// Where sheets live (spec §13's `artwork_dir`), before `App` exists.
@@ -992,6 +1003,7 @@ impl App {
             tray::Action::SheetHelp => self.show_sheet_help(),
             tray::Action::OpenSheetSource(i) => open_sheet_source(i),
             tray::Action::SelectSheet(i) => self.select_sheet(i),
+            tray::Action::SetDancerCount(n) => self.set_dancer_count(n, el),
             tray::Action::YandexSignIn => {
                 self.account = account::Status::Checking;
                 account::sign_in(self.account_ch.tx.clone());
@@ -1060,6 +1072,95 @@ impl App {
         on
     }
 
+    /// Grow or shrink the troupe, live (tray: Dancer -> N dancers).
+    ///
+    /// Shrinking drops dancers from the end -- dropping a `Dancer` drops its
+    /// window, which closes it. Growing follows the same rules as launch: sheets
+    /// from `[dancers] sheets` or at random from the artwork folder, size
+    /// jittered, a fresh scheduler seed each. A new dancer also *joins the song
+    /// in progress*: identity and grid are replayed to it from dancer 0, so it
+    /// starts dancing at the next position report instead of idling until the
+    /// next track change.
+    fn set_dancer_count(&mut self, n: usize, el: &ActiveEventLoop) {
+        let n = n.clamp(1, 16);
+        if n == self.dancers.len() {
+            return;
+        }
+
+        if n < self.dancers.len() {
+            self.dancers.truncate(n);
+        } else {
+            let mut rng = XorShift::new(seed());
+            let artwork = self.artwork_dir();
+            let pool = troupe_pool(&self.cfg, &artwork);
+            while self.dancers.len() < n {
+                let i = self.dancers.len();
+                let (sheet_i, path_i) = match pick_pool_sheet(&self.cfg, &pool, i, &mut rng)
+                    .map(|p| (Sheet::load(&p), p))
+                {
+                    Some((Ok(s), p)) => (s, p),
+                    Some((Err(e), p)) => {
+                        tracing::warn!(sheet = %p.display(), error = %e, "dancer sheet failed; using dancer 0's");
+                        (self.dancers[0].sheet.clone(), self.dancers[0].sheet_path.clone())
+                    }
+                    None => (self.dancers[0].sheet.clone(), self.dancers[0].sheet_path.clone()),
+                };
+
+                let jitter = self.cfg.dancers.jitter();
+                let spread = if jitter > 0.0 {
+                    1.0 + jitter * (rng.unit() * 2.0 - 1.0)
+                } else {
+                    1.0
+                };
+                let scale = (self.cfg.sprite.scale * spread).clamp(0.1, 8.0);
+
+                let mut playback = Playback::new(
+                    Instant::now(),
+                    self.cfg.playback.offset_secs,
+                    row_info(&sheet_i),
+                    sheet_i.default_row,
+                    rng.next(),
+                );
+                if !self.dancers[0].playback.anticipating() {
+                    playback.toggle_anticipation();
+                }
+                // Join the song in progress: TrackChanged and ScoreReady were
+                // broadcast once, before this dancer existed. Replay them from
+                // dancer 0; the next position report locks the clock.
+                if let Some(meta) = self.dancers[0].playback.track.clone() {
+                    let id = meta.id.clone();
+                    playback.apply(AppEvent::TrackChanged { id: id.clone(), meta });
+                    if let Some(score) = self.dancers[0].playback.clock.score().cloned() {
+                        playback.apply(AppEvent::ScoreReady { id, score });
+                    }
+                }
+
+                let mut d = dancer::Dancer::new(sheet_i, path_i, playback, scale);
+
+                // To the right of the rightmost dancer, at dancer 0's height.
+                let right = self
+                    .dancers
+                    .iter()
+                    .map(|d| d.pos.0 + d.surface_size().0 as i32)
+                    .max()
+                    .unwrap_or(0);
+                let pos = (right + 12, self.dancers[0].pos.1);
+                tracing::info!(dancer = i, sheet = %d.sheet_path.display(), scale, "dancer joins");
+                if !d.create_window(el, &self.cfg, pos) {
+                    break;
+                }
+                self.dancers.push(d);
+            }
+            self.reset_watch_sheets();
+        }
+
+        self.cfg.dancers.count = self.dancers.len();
+        tracing::info!(dancers = self.dancers.len(), "troupe resized");
+        if let Err(e) = self.cfg.save(&self.dir) {
+            tracing::warn!(error = %e, "could not save the dancer count");
+        }
+    }
+
     /// Move the output-latency offset (spec §9.2) and persist it.
     ///
     /// Written through immediately rather than on exit: this is dialled in by eye
@@ -1126,6 +1227,11 @@ impl App {
         self.cfg.sprite = fresh.sprite;
         self.cfg.window = fresh.window;
         self.cfg.playback = fresh.playback;
+        // Sheets and jitter apply to the *next* dancer added; the live count is
+        // not resized from here (this runs off the file watcher, which has no
+        // event loop to create windows with). The tray applies counts live.
+        self.cfg.dancers = fresh.dancers;
+        self.cfg.dancers.count = self.dancers.len();
         self.cfg.window.x = pos_x;
         self.cfg.window.y = pos_y;
         self.cfg.window.monitor = monitor;
@@ -1355,6 +1461,7 @@ impl App {
             anticipate: playback.anticipating(),
             offset_secs: self.cfg.playback.offset_secs,
             yandex: account::status_line(&self.account),
+            dancers: self.dancers.len(),
         }
     }
 

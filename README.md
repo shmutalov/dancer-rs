@@ -69,7 +69,8 @@ scale_jitter = 0.3   # each dancer sized at scale x (1 +/- 0.3), once per launch
 
 Every dancer follows the same beat grid but carries its own scheduler seed, so a
 troupe picks different moves on the same downbeat — dancing together, not
-copy-pasted.
+copy-pasted. The count is also in the tray, under Dancer: new dancers join the
+song already playing.
 
 ## What syncs, and what does not
 

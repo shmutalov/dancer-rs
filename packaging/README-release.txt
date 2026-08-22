@@ -155,6 +155,9 @@ More than one dancer
                          # the artwork folder (or uses [sprite] sheet alone)
     scale_jitter = 0.3   # size spread: scale x (1 +/- 0.3), drawn once per launch
 
+Or skip the file: the tray menu, under Dancer, has the count too, and it applies
+immediately -- new dancers join the song already playing.
+
 Every dancer follows the same beat but chooses its own moves, so a troupe reads
 as dancers together rather than one dancer copied. Right-click any of them to
 resize or mirror it; drag them wherever you like. The first dancer's position is

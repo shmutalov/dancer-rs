@@ -32,6 +32,8 @@ pub enum Action {
     OpenDataDir,
     /// Switch to the sheet at this index of the list the tray was built with.
     SelectSheet(usize),
+    /// Run this many dancers (ROADMAP: troupe). Applied live.
+    SetDancerCount(usize),
     OpenArtworkDir,
     /// Show the "where do dancers come from" help.
     SheetHelp,
@@ -41,6 +43,13 @@ pub enum Action {
     YandexSignIn,
     Quit,
 }
+
+/// The troupe sizes on offer.
+///
+/// A ladder for the same reason the context menu's scales are one: `muda` has no
+/// number input, and these cover every count a desktop can hold with dignity.
+/// `[dancers] count` in the config still goes to 16.
+pub const COUNTS: &[usize] = &[1, 2, 3, 4, 5, 6, 8];
 
 /// Offset step per nudge, in seconds.
 ///
@@ -66,6 +75,8 @@ pub struct State {
     pub anticipate: bool,
     pub offset_secs: f64,
     pub yandex: String,
+    /// How many dancers are on screen right now.
+    pub dancers: usize,
 }
 
 pub struct Tray {
@@ -77,6 +88,8 @@ pub struct Tray {
     click_through: CheckMenuItem,
     always_on_top: CheckMenuItem,
     anticipate: CheckMenuItem,
+    /// One per entry of [`COUNTS`]; exactly the current one is ticked.
+    counts: Vec<CheckMenuItem>,
     yandex: MenuItem,
     ids: Ids,
 }
@@ -96,6 +109,7 @@ struct Ids {
     open_artwork: MenuId,
     sheet_help: MenuId,
     sources: Vec<MenuId>,
+    counts: Vec<MenuId>,
     yandex_sign_in: MenuId,
     quit: MenuId,
 }
@@ -163,6 +177,22 @@ impl Tray {
             source_items.push(item);
         }
 
+        // How many at once. Lives inside the Dancer submenu: it is the same
+        // subject, and top-level menus grow one line at a time until nobody can
+        // find anything.
+        let mut count_items = Vec::with_capacity(COUNTS.len());
+        dancers.append(&PredefinedMenuItem::separator())?;
+        for &n in COUNTS {
+            let text = if n == 1 {
+                "1 dancer".to_string()
+            } else {
+                format!("{n} dancers")
+            };
+            let item = CheckMenuItem::new(text, true, n == now.dancers, None);
+            dancers.append(&item)?;
+            count_items.push(item);
+        }
+
         let yandex_item = MenuItem::new(&now.yandex, false, None);
         let yandex_sign_in = MenuItem::new("Sign in to Yandex Music...", true, None);
 
@@ -180,6 +210,7 @@ impl Tray {
             open_artwork: open_artwork.id().clone(),
             sheet_help: sheet_help.id().clone(),
             sources: source_items.iter().map(|i| i.id().clone()).collect(),
+            counts: count_items.iter().map(|i| i.id().clone()).collect(),
             yandex_sign_in: yandex_sign_in.id().clone(),
             quit: quit.id().clone(),
         };
@@ -220,6 +251,7 @@ impl Tray {
             click_through: click_through_item,
             always_on_top: always_on_top_item,
             anticipate: anticipate_item,
+            counts: count_items,
             yandex: yandex_item,
             ids,
         })
@@ -261,6 +293,8 @@ impl Tray {
             Action::SelectSheet(i)
         } else if let Some(i) = self.ids.sources.iter().position(|s| s == id) {
             Action::OpenSheetSource(i)
+        } else if let Some(i) = self.ids.counts.iter().position(|s| s == id) {
+            Action::SetDancerCount(COUNTS[i])
         } else if *id == self.ids.quit {
             Action::Quit
         } else {
@@ -283,6 +317,9 @@ impl Tray {
         self.click_through.set_checked(now.click_through);
         self.always_on_top.set_checked(now.always_on_top);
         self.anticipate.set_checked(now.anticipate);
+        for (item, &n) in self.counts.iter().zip(COUNTS) {
+            item.set_checked(n == now.dancers);
+        }
     }
 }
 
