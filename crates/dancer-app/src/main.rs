@@ -54,15 +54,38 @@ use events::AppEvent;
 use playback::Playback;
 
 
-fn main() -> anyhow::Result<()> {
+fn main() {
     // Before anything writes a byte. In release this is a GUI-subsystem binary
     // with no console, so a command-line invocation has nowhere to print until
     // one is attached — see `console`.
     let argv: Vec<String> = std::env::args().skip(1).collect();
-    if is_command_line(&argv) {
+    let cli = is_command_line(&argv);
+    if cli {
         console::attach();
     }
 
+    if let Err(e) = run(argv) {
+        // `{e:#}` chains the contexts: "loading sheet X: file not found" rather
+        // than just the outermost line.
+        tracing::error!(error = %format!("{e:#}"), "fatal");
+        if cli {
+            eprintln!("Error: {e:#}");
+        } else {
+            // A release build has no console, so before this dialog existed a
+            // startup failure was an exit code and nothing else — the app died
+            // with the reason written to a stderr nobody can see.
+            dialog::error(
+                "dancer-rs could not start",
+                &format!("{e:#}
+
+Details are in dancer-rs.log, next to the executable."),
+            );
+        }
+        std::process::exit(1);
+    }
+}
+
+fn run(argv: Vec<String>) -> anyhow::Result<()> {
     // Resolved before the subscriber exists, because the log file lives in it.
     // `data_dir` logs one line when the exe directory turns out to be read-only,
     // and that line is lost here — the resolved directory is logged below, which
@@ -263,17 +286,28 @@ fn build_troupe(
     let mut rng = XorShift::new(seed);
 
     // Candidates for dancers beyond the first: the named list, or the folder.
+    // Names resolve against the same scan the tray shows, matched by that menu's
+    // own labels — `PolishCow` finds `assets/polish-cow/PolishCow.png`, and
+    // `polish-cow/PolishCow` names it exactly.
     let artwork = artwork_dir_of(cfg, dir);
-    let named: Vec<PathBuf> = cfg
-        .dancers
-        .sheets
-        .iter()
-        .map(|stem| artwork.join(format!("{stem}.png")))
-        .collect();
-    let pool: Vec<PathBuf> = if named.is_empty() {
-        sheets::list(&artwork)
+    let scanned = sheets::list(&artwork);
+    let pool: Vec<PathBuf> = if cfg.dancers.sheets.is_empty() {
+        scanned
     } else {
-        named
+        cfg.dancers
+            .sheets
+            .iter()
+            .filter_map(|name| {
+                let hit = scanned.iter().find(|p| {
+                    sheets::label_in(&artwork, p).eq_ignore_ascii_case(name)
+                        || sheets::label(p).eq_ignore_ascii_case(name)
+                });
+                if hit.is_none() {
+                    tracing::warn!(name, "no such sheet in the artwork folder; skipping");
+                }
+                hit.cloned()
+            })
+            .collect()
     };
 
     let mut out = Vec::with_capacity(count);
@@ -868,7 +902,8 @@ impl App {
         // Rescanned on every build, so a sheet dropped into the folder appears
         // after any action that rebuilds the tray rather than only after a restart.
         self.sheets = sheets::list(&self.artwork_dir());
-        let names: Vec<String> = self.sheets.iter().map(|p| sheets::label(p)).collect();
+        let art = self.artwork_dir();
+        let names: Vec<String> = self.sheets.iter().map(|p| sheets::label_in(&art, p)).collect();
         let current = self
             .sheets
             .iter()

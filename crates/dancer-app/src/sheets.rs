@@ -94,32 +94,42 @@ pub fn help_text(artwork_dir: &Path) -> String {
     t
 }
 
-/// Every sheet in `dir`, sorted by name.
+/// Every sheet in `dir` — and one level of subfolders, sorted by name.
 ///
 /// A sheet is a `.png`, and nothing further is checked here. The alternative —
 /// requiring a `.txt` or `.toml` sidecar — would hide a sheet that has neither, and
 /// the loader handles that case perfectly well by synthesising row names (spec
 /// §4.1). Hiding a usable file is worse than listing one that turns out not to load.
+///
+/// One level deep because that is how people actually keep collections — a folder
+/// per dancer, sidecars beside each PNG — and because unbounded recursion pointed
+/// at a configurable path is how a menu ends up walking somebody's photo library.
 pub fn list(dir: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         tracing::debug!(dir = %dir.display(), "no artwork folder to list");
         return Vec::new();
     };
 
-    let mut out: Vec<PathBuf> = entries
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| {
-            p.extension()
-                .is_some_and(|e| e.eq_ignore_ascii_case("png"))
-                && p.is_file()
-        })
-        .collect();
+    let mut out: Vec<PathBuf> = Vec::new();
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if is_sheet(&p) {
+            out.push(p);
+        } else if p.is_dir() {
+            if let Ok(sub) = std::fs::read_dir(&p) {
+                out.extend(sub.flatten().map(|e| e.path()).filter(|p| is_sheet(p)));
+            }
+        }
+    }
 
     // Sorted so the menu order is stable. Directory order is not, and a menu whose
     // entries move between runs is one people misclick.
-    out.sort_by_key(|p| label(p).to_lowercase());
+    out.sort_by_key(|p| label_in(dir, p).to_lowercase());
     out
+}
+
+fn is_sheet(p: &Path) -> bool {
+    p.extension().is_some_and(|e| e.eq_ignore_ascii_case("png")) && p.is_file()
 }
 
 /// What to call a sheet in the menu.
@@ -127,6 +137,22 @@ pub fn label(path: &Path) -> String {
     path.file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.to_string_lossy().into_owned())
+}
+
+/// The menu name for a sheet found under `root`: `flchan/Dance_Large` rather than
+/// a bare `Dance_Large`, so two same-named sheets in different folders stay
+/// distinguishable.
+pub fn label_in(root: &Path, path: &Path) -> String {
+    match path.strip_prefix(root) {
+        Ok(rel) => {
+            let mut l = rel.with_extension("").to_string_lossy().into_owned();
+            // One separator, regardless of what the OS handed back: this is a
+            // menu label, not a path.
+            l = l.replace('\\', "/");
+            l
+        }
+        Err(_) => label(path),
+    }
 }
 
 #[cfg(test)]
@@ -196,6 +222,22 @@ mod tests {
 
         let found: Vec<String> = list(&d).iter().map(|p| label(p)).collect();
         assert_eq!(found, ["a", "b"], "{found:?}");
+    }
+
+    #[test]
+    fn sheets_one_folder_down_are_listed_with_their_folder_in_the_label() {
+        // People keep collections as a folder per dancer. Before this, an artwork
+        // directory organised that way produced an empty Dancer menu.
+        let d = tmp("nested");
+        std::fs::write(d.join("top.png"), b"x").unwrap();
+        std::fs::create_dir_all(d.join("flchan")).unwrap();
+        std::fs::write(d.join("flchan").join("Dance_Large.png"), b"x").unwrap();
+        std::fs::create_dir_all(d.join("deep").join("deeper")).unwrap();
+        std::fs::write(d.join("deep").join("deeper").join("far.png"), b"x").unwrap();
+
+        let found: Vec<String> = list(&d).iter().map(|p| label_in(&d, p)).collect();
+        // One level only: `far.png` stays out.
+        assert_eq!(found, ["flchan/Dance_Large", "top"], "{found:?}");
     }
 
     #[test]
