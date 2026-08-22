@@ -39,6 +39,7 @@ mod context;
 mod dancer;
 mod dialog;
 mod events;
+mod i18n;
 mod library;
 mod logging;
 mod playback;
@@ -74,12 +75,7 @@ fn main() {
             // A release build has no console, so before this dialog existed a
             // startup failure was an exit code and nothing else — the app died
             // with the reason written to a stderr nobody can see.
-            dialog::error(
-                "dancer-rs could not start",
-                &format!("{e:#}
-
-Details are in dancer-rs.log, next to the executable."),
-            );
+            dialog::error(i18n::t().fatal_title, &(i18n::t().fatal_body)(&format!("{e:#}")));
         }
         std::process::exit(1);
     }
@@ -109,6 +105,7 @@ fn run(argv: Vec<String>) -> anyhow::Result<()> {
     }
 
     let cfg = Config::load(&dir);
+    i18n::set(i18n::Lang::from_config(&cfg.ui.language));
 
     // Round-trips the loaded config, so a file written by an older build gains
     // whatever keys have since appeared without losing what is already set.
@@ -670,7 +667,7 @@ fn open_sheet_source(index: usize) {
         return;
     };
     std::thread::spawn(move || {
-        if dialog::confirm("Whose artwork is this?", &sheets::ownership_warning(source)) {
+        if dialog::confirm(i18n::t().whose_artwork, &sheets::ownership_warning(source)) {
             dialog::open_url(source.url);
         }
     });
@@ -1438,7 +1435,7 @@ impl App {
     /// Explain where dancers come from, on a worker thread so the dancer keeps going.
     fn show_sheet_help(&self) {
         let text = sheets::help_text(&self.artwork_dir());
-        std::thread::spawn(move || dialog::info("Adding dancers", &text));
+        std::thread::spawn(move || dialog::info(i18n::t().adding_dancers, &text));
     }
 
     /// Fold in whatever the Yandex worker learned.
@@ -1476,17 +1473,10 @@ impl App {
                     self.account = account::Status::Ok(login.clone());
                     let dir = self.dir.clone();
                     std::thread::spawn(move || {
+                        let t = i18n::t();
                         dialog::info(
-                            "Signed in to Yandex Music",
-                            &format!(
-                                "Signed in as {login}.\n\n\
-                                 Streamed tracks will now be fetched, analysed and \
-                                 deleted immediately — only the beat grid is kept.\n\n\
-                                 The token is stored in plain text in\n     {}\n\n\
-                                 Revoke it any time at {}",
-                                dir.join("config.toml").display(),
-                                account::REVOKE_URL
-                            ),
+                            t.signed_in_title,
+                            &(t.signed_in_body)(&login, &dir.join("config.toml"), account::REVOKE_URL),
                         );
                     });
                 }
@@ -1498,14 +1488,8 @@ impl App {
                         self.account = account::Status::Off;
                     }
                     std::thread::spawn(move || {
-                        dialog::error(
-                            "Sign-in did not complete",
-                            &format!(
-                                "{why}\n\nNothing has changed. You can try again from \
-                                 the tray menu whenever you like — the dancer works \
-                                 without it, it just cannot analyse streamed tracks."
-                            ),
-                        );
+                        let t = i18n::t();
+                        dialog::error(t.sign_in_failed_title, &(t.sign_in_failed_body)(&why));
                     });
                 }
             }
@@ -1520,15 +1504,8 @@ impl App {
     fn offer_sign_in(&mut self) {
         let tx = self.account_ch.tx.clone();
         std::thread::spawn(move || {
-            let yes = dialog::confirm(
-                "Yandex sign-in expired",
-                "The saved Yandex Music sign-in is no longer valid — it has expired \
-                 or been revoked.\n\n\
-                 Until you sign in again, streamed tracks cannot be analysed and the \
-                 dancer will loop at a fixed rate for them. Everything else keeps \
-                 working.\n\n\
-                 Sign in again now?",
-            );
+            let t = i18n::t();
+            let yes = dialog::confirm(t.sign_in_expired_title, t.sign_in_expired_body);
             if yes {
                 account::sign_in(tx);
             }
@@ -1541,7 +1518,7 @@ impl App {
         // stream, so their states only differ transiently.
         let playback = &self.dancers[0].playback;
         tray::State {
-            state: playback.state.name().to_string(),
+            state: (i18n::t().state)(playback.state.name()).to_string(),
             track: playback.track.as_ref().map(|t| {
                 if t.artist.is_empty() {
                     t.title.clone()

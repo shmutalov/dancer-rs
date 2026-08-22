@@ -36,6 +36,8 @@ use tray_icon::menu::{
 };
 use windows::Win32::Foundation::HWND;
 
+use crate::i18n::t;
+
 /// What the user picked. A request, not a mutation — same contract as the tray.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Action {
@@ -88,10 +90,11 @@ impl Context {
     /// Build the menu as of `view` right now.
     pub fn new(view: &View) -> anyhow::Result<Self> {
         let menu = Menu::new();
+        let txt = t();
 
         // Radio behaviour by hand: `muda` has no radio item, and a check item per
         // sheet with exactly one ticked reads the same way.
-        let sheet_menu = Submenu::new("Sheet", true);
+        let sheet_menu = Submenu::new(txt.sheet, true);
         let mut sheets = Vec::with_capacity(view.sheets.len());
         for (i, name) in view.sheets.iter().enumerate() {
             let item = CheckMenuItem::new(name, true, Some(i) == view.current_sheet, None);
@@ -101,17 +104,17 @@ impl Context {
         if view.sheets.is_empty() {
             // Never an empty submenu: an empty one looks broken, whereas a line
             // saying what is missing points at the fix.
-            sheet_menu.append(&MenuItem::new("No sheets in the artwork folder", false, None))?;
+            sheet_menu.append(&MenuItem::new(txt.no_sheets, false, None))?;
         }
         menu.append(&sheet_menu)?;
 
-        let size_menu = Submenu::new("Size", true);
+        let size_menu = Submenu::new(txt.size, true);
         let on_ladder = SCALES.iter().any(|s| (s - view.scale).abs() < EPS);
         if !on_ladder {
             // A hand-edited or jittered value. Shown, ticked and disabled: the
             // menu must not pretend the current size is not the current size.
             size_menu.append(&CheckMenuItem::new(
-                format!("{:.0}% (current)", view.scale * 100.0),
+                (txt.size_current)(view.scale),
                 false,
                 true,
                 None,
@@ -130,20 +133,20 @@ impl Context {
         }
         menu.append(&size_menu)?;
 
-        let mirror_item = CheckMenuItem::new("Mirror", true, view.mirror, None);
+        let mirror_item = CheckMenuItem::new(txt.mirror, true, view.mirror, None);
         let mirror = mirror_item.id().clone();
         menu.append(&mirror_item)?;
 
         menu.append(&PredefinedMenuItem::separator())?;
-        let duplicate_item = MenuItem::new("Duplicate", true, None);
+        let duplicate_item = MenuItem::new(txt.duplicate, true, None);
         let duplicate = duplicate_item.id().clone();
         menu.append(&duplicate_item)?;
-        let remove_item = MenuItem::new("Remove this dancer", view.removable, None);
+        let remove_item = MenuItem::new(txt.remove_this_dancer, view.removable, None);
         let remove = remove_item.id().clone();
         menu.append(&remove_item)?;
 
         menu.append(&PredefinedMenuItem::separator())?;
-        let quit_item = MenuItem::new("Quit dancer-rs", true, None);
+        let quit_item = MenuItem::new(txt.quit_app, true, None);
         let quit = quit_item.id().clone();
         menu.append(&quit_item)?;
 

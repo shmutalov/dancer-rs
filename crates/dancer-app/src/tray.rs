@@ -17,6 +17,8 @@
 use tray_icon::menu::{CheckMenuItem, Menu, MenuId, MenuItem, PredefinedMenuItem, Submenu};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
+use crate::i18n::t;
+
 /// What the user asked for.
 ///
 /// Deliberately a request rather than a mutation: the tray owns no application
@@ -128,23 +130,24 @@ impl Tray {
         let status = MenuItem::new(&now.state, false, None);
         let offset_label = MenuItem::new(offset_text(now.offset_secs), false, None);
 
-        let click_through_item = CheckMenuItem::new("Click-through", true, now.click_through, None);
-        let always_on_top_item = CheckMenuItem::new("Always on top", true, now.always_on_top, None);
-        let anticipate_item = CheckMenuItem::new("Anticipate the beat", true, now.anticipate, None);
+        let s = t();
+        let click_through_item = CheckMenuItem::new(s.click_through, true, now.click_through, None);
+        let always_on_top_item = CheckMenuItem::new(s.always_on_top, true, now.always_on_top, None);
+        let anticipate_item = CheckMenuItem::new(s.anticipate, true, now.anticipate, None);
 
-        let minus_coarse = MenuItem::new("Offset  -25 ms", true, None);
-        let minus_fine = MenuItem::new("Offset   -5 ms", true, None);
-        let plus_fine = MenuItem::new("Offset   +5 ms", true, None);
-        let plus_coarse = MenuItem::new("Offset  +25 ms", true, None);
-        let reset_offset = MenuItem::new("Reset offset", true, None);
+        let minus_coarse = MenuItem::new(s.offset_minus_coarse, true, None);
+        let minus_fine = MenuItem::new(s.offset_minus_fine, true, None);
+        let plus_fine = MenuItem::new(s.offset_plus_fine, true, None);
+        let plus_coarse = MenuItem::new(s.offset_plus_coarse, true, None);
+        let reset_offset = MenuItem::new(s.reset_offset, true, None);
 
-        let open_dir = MenuItem::new("Open data folder", true, None);
-        let quit = MenuItem::new("Quit", true, None);
+        let open_dir = MenuItem::new(s.open_data_folder, true, None);
+        let quit = MenuItem::new(s.quit, true, None);
 
         // Which sheet a *new* dancer wears. Changing an existing dancer's sheet
         // is that dancer's own business — its right-click menu — so nothing here
         // is a radio list: these are verbs, one per sheet.
-        let add = Submenu::new("Add dancer", true);
+        let add = Submenu::new(s.add_dancer, true);
         let mut add_items = Vec::with_capacity(sheets.len());
         for name in sheets {
             let item = MenuItem::new(name, true, None);
@@ -154,16 +157,16 @@ impl Tray {
         if sheets.is_empty() {
             // Never an empty submenu: an empty one looks broken, whereas a line
             // saying what is missing points at the fix.
-            add.append(&MenuItem::new("No sheets in the artwork folder", false, None))?;
+            add.append(&MenuItem::new(s.no_sheets, false, None))?;
         }
-        let add_random = MenuItem::new("Random", !sheets.is_empty(), None);
+        let add_random = MenuItem::new(s.random, !sheets.is_empty(), None);
         add.append_items(&[&PredefinedMenuItem::separator(), &add_random])?;
 
-        let remove_last = MenuItem::new("Remove last dancer", now.dancers > 1, None);
+        let remove_last = MenuItem::new(s.remove_last_dancer, now.dancers > 1, None);
 
-        let dancers = Submenu::new("Dancers", true);
-        let open_artwork = MenuItem::new("Open artwork folder", true, None);
-        let sheet_help = MenuItem::new("How to add dancers...", true, None);
+        let dancers = Submenu::new(s.dancers, true);
+        let open_artwork = MenuItem::new(s.open_artwork_folder, true, None);
+        let sheet_help = MenuItem::new(s.how_to_add_dancers, true, None);
         dancers.append_items(&[
             &add,
             &remove_last,
@@ -176,13 +179,13 @@ impl Tray {
         // browser opens — a menu the app drew reads as an endorsement otherwise.
         let mut source_items = Vec::with_capacity(sources.len());
         for name in sources {
-            let item = MenuItem::new(format!("Get {name}..."), true, None);
+            let item = MenuItem::new((s.get_sheet)(name), true, None);
             dancers.append(&item)?;
             source_items.push(item);
         }
 
         let yandex_item = MenuItem::new(&now.yandex, false, None);
-        let yandex_sign_in = MenuItem::new("Sign in to Yandex Music...", true, None);
+        let yandex_sign_in = MenuItem::new(s.sign_in_yandex, true, None);
 
         let ids = Ids {
             click_through: click_through_item.id().clone(),
@@ -313,7 +316,7 @@ impl Tray {
 }
 
 fn offset_text(secs: f64) -> String {
-    format!("Output offset: {:+.0} ms", secs * 1000.0)
+    (t().output_offset)(secs)
 }
 
 /// Turn one premultiplied-BGRA sprite cell into a tray icon.

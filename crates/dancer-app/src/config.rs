@@ -18,6 +18,7 @@ pub struct Config {
     pub source: SourceCfg,
     pub library: LibraryCfg,
     pub dancers: Dancers,
+    pub ui: Ui,
 }
 
 /// Where the user's own music lives (spec §8.3, §13).
@@ -181,6 +182,23 @@ impl Default for Config {
             source: SourceCfg::default(),
             library: LibraryCfg::default(),
             dancers: Dancers::default(),
+            ui: Ui::default(),
+        }
+    }
+}
+
+/// `[ui]`: what the person sees, as opposed to what the dancer does.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Ui {
+    /// `"auto"` follows the Windows display language; `"en"` or `"ru"` pin it.
+    pub language: String,
+}
+
+impl Default for Ui {
+    fn default() -> Self {
+        Self {
+            language: "auto".into(),
         }
     }
 }

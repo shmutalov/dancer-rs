@@ -130,18 +130,8 @@ fn sign_in_blocking() -> AccountEvent {
         };
         dialog::open_url(&code.verification_url);
         let minutes = code.expires_in.map(|d| d.as_secs() / 60).unwrap_or(5);
-        dialog::info(
-            "Sign in to Yandex Music",
-            &format!(
-                "A Yandex page has opened in your browser.\n\n\
-                 Enter this code:\n\n        {}\n\n\
-                 The code is valid for about {minutes} minutes. \
-                 Press Ctrl+C now to copy this message if you need the code elsewhere.\n\n\
-                 Click OK when you are done — signing in continues in the background, \
-                 and the dancer keeps dancing.",
-                code.user_code
-            ),
-        );
+        let t = crate::i18n::t();
+        dialog::info(t.sign_in_code_title, &(t.sign_in_code_body)(&code.user_code, minutes));
     });
 
     let result = runtime.block_on(dancer_yandex::login(&device, |code| {
@@ -177,12 +167,13 @@ fn sign_in_blocking() -> AccountEvent {
 
 /// One-line summary for the tray menu.
 pub fn status_line(state: &Status) -> String {
+    let t = crate::i18n::t();
     match state {
-        Status::Off => "Yandex: not signed in".into(),
-        Status::Checking => "Yandex: checking…".into(),
-        Status::Ok(login) => format!("Yandex: {login}"),
-        Status::Rejected => "Yandex: sign-in expired".into(),
-        Status::Unavailable => "Yandex: unreachable".into(),
+        Status::Off => t.yandex_off.into(),
+        Status::Checking => t.yandex_checking.into(),
+        Status::Ok(login) => (t.yandex_as)(login),
+        Status::Rejected => t.yandex_expired.into(),
+        Status::Unavailable => t.yandex_unreachable.into(),
     }
 }
 

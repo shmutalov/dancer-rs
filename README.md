@@ -73,6 +73,14 @@ Every dancer follows the same beat grid but carries its own scheduler seed, so a
 troupe picks different moves on the same downbeat — dancing together, not
 copy-pasted.
 
+The menus and dialogs follow the Windows display language — English or Russian
+so far — or can be pinned:
+
+```toml
+[ui]
+language = "ru"   # "auto" | "en" | "ru"
+```
+
 ## What syncs, and what does not
 
 Tracks you own and have analysed sync fully.

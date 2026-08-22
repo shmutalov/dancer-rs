@@ -45,53 +45,14 @@ pub const SOURCES: &[Source] = &[
 /// a menu it drew, which reads like an endorsement — as though picking a dancer
 /// from a list makes the artwork part of the product. It is not. Saying so once,
 /// in front of the link, is the difference between offering a pointer and implying
-/// a licence.
+/// a licence. The words live in `i18n`, with the rest of what the user reads.
 pub fn ownership_warning(source: &Source) -> String {
-    let mut w = String::new();
-    w.push_str(source.name);
-    w.push_str(" is not ours, and downloading it does not make it yours.\n\n");
-    w.push_str("The artwork belongs to ");
-    w.push_str(source.owner);
-    w.push_str(". It is published on their terms — read them.\n\n");
-    w.push_str(
-        "dancer-rs does not host, bundle or redistribute any sprite sheet, and neither \
-         should you: please do not pass sheets on with copies of this app. The only \
-         artwork shipped with it is the plain default sheet.\n\n",
-    );
-    w.push_str("Open the download page in your browser?");
-    w
+    (crate::i18n::t().ownership_warning)(source.name, source.owner)
 }
 
-/// The "How to add dancers" text.
-///
-/// Built by pushing rather than as one long literal, and that is not a style
-/// preference. A `\` line continuation in a Rust string keeps the *following*
-/// line's indentation unless that line is flush left, so a paragraph laid out to
-/// look tidy in source renders with a twenty-space gap in the middle of a sentence.
-/// It compiles, it passes every other test, and the first sign of trouble is a
-/// screenshot of the dialog. Pushing whole lines cannot do that, and living here
-/// rather than in `main` means the guard test can read it.
+/// The "How to add dancers" text, in the user's language.
 pub fn help_text(artwork_dir: &Path) -> String {
-    let mut t = String::new();
-    t.push_str("A dancer is a sprite sheet: one PNG that is 8 cells wide, with one row ");
-    t.push_str("per animation, plus a .txt naming those rows one per line.\n\n");
-    t.push_str("The format comes from FAOSDance and Fruity Dance, so sheets made for ");
-    t.push_str("either will work here.\n\n");
-    t.push_str("To add one:\n\n");
-    t.push_str("1. Put the .png and its .txt in:\n");
-    t.push_str(&artwork_dir.display().to_string());
-    t.push_str("\n\n2. Pick it from the tray, under Dancer.\n\n");
-    t.push_str("For it to dance in time rather than just loop, add a .toml beside the ");
-    t.push_str("PNG saying which cell is each move's accent. See default.toml in that ");
-    t.push_str("folder for a worked example, and check your work with:\n\n");
-    t.push_str("dancer-rs.exe <sheet.png> --check-sheet\n\n");
-    t.push_str("----\n\n");
-    t.push_str("Sprite sheets are other people's work. Neither dancer-rs nor you own ");
-    t.push_str("the artwork on the pages linked in that menu — it belongs to whoever ");
-    t.push_str("made it, published on their terms. Nothing is bundled or redistributed ");
-    t.push_str("here, and please do not pass sheets on with copies of this app. The ");
-    t.push_str("only artwork shipped with it is the plain default sheet.");
-    t
+    (crate::i18n::t().help_text)(artwork_dir)
 }
 
 /// Every sheet in `dir` — and one level of subfolders, sorted by name.

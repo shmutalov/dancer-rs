@@ -167,6 +167,16 @@ a troupe reads as dancers together rather than one dancer copied. The first
 dancer's position is remembered; the rest line up beside it on the next start.
 
 
+Language
+--------
+
+Menus and dialogs follow the Windows display language: English, or Russian if
+that is what Windows is set to. To pin it regardless:
+
+    [ui]
+    language = "ru"      # "auto" | "en" | "ru"
+
+
 Controls
 --------
 
