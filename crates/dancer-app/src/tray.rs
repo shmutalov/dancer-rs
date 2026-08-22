@@ -44,6 +44,8 @@ pub enum Action {
     OpenSheetSource(usize),
     /// Start the Yandex OAuth device flow.
     YandexSignIn,
+    /// Switch the UI language, live.
+    SetLanguage(crate::i18n::Lang),
     Quit,
 }
 
@@ -109,6 +111,8 @@ struct Ids {
     sheet_help: MenuId,
     sources: Vec<MenuId>,
     yandex_sign_in: MenuId,
+    /// One per entry of `i18n::ALL`, in that order.
+    languages: Vec<MenuId>,
     quit: MenuId,
 }
 
@@ -184,6 +188,16 @@ impl Tray {
             source_items.push(item);
         }
 
+        // Native names, current one ticked. The tray is rebuilt on a switch, so
+        // the ticks never go stale.
+        let language = Submenu::new(s.language, true);
+        let mut language_items = Vec::with_capacity(crate::i18n::ALL.len());
+        for &(lang, name) in crate::i18n::ALL {
+            let item = CheckMenuItem::new(name, true, lang == crate::i18n::current(), None);
+            language.append(&item)?;
+            language_items.push(item);
+        }
+
         let yandex_item = MenuItem::new(&now.yandex, false, None);
         let yandex_sign_in = MenuItem::new(s.sign_in_yandex, true, None);
 
@@ -204,6 +218,7 @@ impl Tray {
             sheet_help: sheet_help.id().clone(),
             sources: source_items.iter().map(|i| i.id().clone()).collect(),
             yandex_sign_in: yandex_sign_in.id().clone(),
+            languages: language_items.iter().map(|i| i.id().clone()).collect(),
             quit: quit.id().clone(),
         };
 
@@ -226,6 +241,7 @@ impl Tray {
             &yandex_item,
             &yandex_sign_in,
             &PredefinedMenuItem::separator(),
+            &language,
             &open_dir,
             &quit,
         ])?;
@@ -281,6 +297,8 @@ impl Tray {
             Action::SheetHelp
         } else if *id == self.ids.yandex_sign_in {
             Action::YandexSignIn
+        } else if let Some(i) = self.ids.languages.iter().position(|s| s == id) {
+            Action::SetLanguage(crate::i18n::ALL[i].0)
         } else if let Some(i) = self.ids.add.iter().position(|s| s == id) {
             Action::AddDancer(Some(i))
         } else if *id == self.ids.add_random {

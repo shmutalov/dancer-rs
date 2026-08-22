@@ -74,7 +74,7 @@ troupe picks different moves on the same downbeat — dancing together, not
 copy-pasted.
 
 The menus and dialogs follow the Windows display language — English or Russian
-so far — or can be pinned:
+so far. Tray → Language switches on the spot, or pin it in the config:
 
 ```toml
 [ui]

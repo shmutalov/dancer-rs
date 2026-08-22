@@ -1059,6 +1059,20 @@ impl App {
                 self.spawn_dancer(path, None, el);
             }
             tray::Action::RemoveLastDancer => self.remove_dancer(self.dancers.len().saturating_sub(1)),
+            tray::Action::SetLanguage(lang) => {
+                if lang != i18n::current() {
+                    i18n::set(lang);
+                    self.cfg.ui.language = lang.key().into();
+                    if let Err(e) = self.cfg.save(&self.dir) {
+                        tracing::warn!(error = %e, "could not save the language");
+                    }
+                    tracing::info!(language = lang.key(), "language");
+                    // Every label the tray holds is in the old language; menus
+                    // are built once, so this is a rebuild, not a refresh. The
+                    // context menu rebuilds on every click regardless.
+                    self.rebuild_tray();
+                }
+            }
             tray::Action::YandexSignIn => {
                 self.account = account::Status::Checking;
                 account::sign_in(self.account_ch.tx.clone());

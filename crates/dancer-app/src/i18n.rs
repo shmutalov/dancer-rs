@@ -15,14 +15,16 @@
 //! The table is a struct rather than a map so a missing translation is a compile
 //! error, not a blank menu item at runtime.
 //!
-//! The language is chosen once at startup — `[ui] language` in the config, or the
-//! Windows UI language when that says `auto` — and read through [`t`] from
-//! anywhere. A global, deliberately: threading a language through every menu
-//! constructor and dialog call would touch every signature in the app for a
-//! value that never changes after line one of `main`.
+//! The language is set at startup — `[ui] language` in the config, or the
+//! Windows UI language when that says `auto` — and can be switched from the tray
+//! at any time; it is read through [`t`] from anywhere. A global, deliberately:
+//! threading a language through every menu constructor and dialog call would
+//! touch every signature in the app for a value that changes once a year. Every
+//! menu is rebuilt on the switch and every dialog reads the table when it opens,
+//! so nothing caches a stale string.
 
 use std::path::Path;
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Lang {
@@ -30,16 +32,27 @@ pub enum Lang {
     Ru,
 }
 
-static LANG: OnceLock<Lang> = OnceLock::new();
+/// Every language there is a table for, in menu order, with its own name for
+/// itself — a language picker is the one menu that must not be translated.
+pub const ALL: &[(Lang, &str)] = &[(Lang::En, "English"), (Lang::Ru, "Русский")];
 
-/// Fix the language for the rest of the process. Later calls are ignored.
+static LANG: AtomicU8 = AtomicU8::new(0);
+
+/// Switch the language for the whole process.
 pub fn set(lang: Lang) {
-    let _ = LANG.set(lang);
+    LANG.store(lang as u8, Ordering::Relaxed);
+}
+
+pub fn current() -> Lang {
+    match LANG.load(Ordering::Relaxed) {
+        1 => Lang::Ru,
+        _ => Lang::En,
+    }
 }
 
 /// The active table. English until [`set`] is called, which is what tests get.
 pub fn t() -> &'static Strings {
-    match LANG.get().copied().unwrap_or(Lang::En) {
+    match current() {
         Lang::En => &EN,
         Lang::Ru => &RU,
     }
@@ -52,6 +65,14 @@ impl Lang {
             "en" => Lang::En,
             "ru" => Lang::Ru,
             _ => Lang::system(),
+        }
+    }
+
+    /// The config spelling of this language.
+    pub fn key(self) -> &'static str {
+        match self {
+            Lang::En => "en",
+            Lang::Ru => "ru",
         }
     }
 
@@ -98,6 +119,7 @@ pub struct Strings {
     pub get_sheet: fn(&str) -> String,
     pub output_offset: fn(f64) -> String,
     pub sign_in_yandex: &'static str,
+    pub language: &'static str,
     /// The playback state, by its English name from `State::name()`.
     pub state: fn(&str) -> &'static str,
 
@@ -165,6 +187,7 @@ pub const EN: Strings = Strings {
     get_sheet: |name| format!("Get {name}..."),
     output_offset: |secs| format!("Output offset: {:+.0} ms", secs * 1000.0),
     sign_in_yandex: "Sign in to Yandex Music...",
+    language: "Language",
     state: |s| s_en(s),
 
     yandex_off: "Yandex: not signed in",
@@ -292,6 +315,7 @@ pub const RU: Strings = Strings {
     get_sheet: |name| format!("Скачать {name}…"),
     output_offset: |secs| format!("Задержка вывода: {:+.0} мс", secs * 1000.0),
     sign_in_yandex: "Войти в Яндекс Музыку…",
+    language: "Язык",
     state: |s| s_ru(s),
 
     yandex_off: "Яндекс: вход не выполнен",
@@ -443,6 +467,7 @@ mod tests {
             (s.get_sheet)("X"),
             (s.output_offset)(0.18),
             s.sign_in_yandex.into(),
+            s.language.into(),
             s.yandex_off.into(),
             (s.yandex_as)("me"),
             s.sheet.into(),

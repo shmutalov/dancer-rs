@@ -171,7 +171,8 @@ Language
 --------
 
 Menus and dialogs follow the Windows display language: English, or Russian if
-that is what Windows is set to. To pin it regardless:
+that is what Windows is set to. The tray menu has a Language entry to switch on
+the spot; to pin it regardless:
 
     [ui]
     language = "ru"      # "auto" | "en" | "ru"
