@@ -18,10 +18,7 @@ use std::time::{Duration, Instant};
 use anyhow::Context as _;
 use tray_icon::menu::MenuEvent;
 use crossbeam_channel::{Receiver, Sender};
-use dancer_render::{
-    apply_window_styles, capture_owner, hwnd_of, present, primary_button_down, reassert_topmost,
-    surface_size, LatencyMonitor, Surface,
-};
+use dancer_render::{apply_window_styles, primary_button_down};
 use dancer_score::Score;
 use dancer_source::{FileSource, Source};
 use dancer_sprite::Sheet;
@@ -29,9 +26,9 @@ use winit::application::ApplicationHandler;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::window::{Window, WindowId, WindowLevel};
+use winit::window::{WindowId, WindowLevel};
 
-use windows::Win32::Foundation::{HWND, POINT};
+use windows::Win32::Foundation::POINT;
 use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 
 mod account;
@@ -39,6 +36,7 @@ mod cli;
 mod config;
 mod console;
 mod context;
+mod dancer;
 mod dialog;
 mod events;
 mod library;
@@ -55,10 +53,6 @@ use config::{data_dir, Config};
 use events::AppEvent;
 use playback::Playback;
 
-/// Grid-driven states re-evaluate at this rate and redraw only when the cell
-/// actually changes. Cheaper than computing exact cell boundaries and immune to
-/// the off-by-one errors that boundary maths invites.
-const GRID_TICK: Duration = Duration::from_millis(8);
 
 fn main() -> anyhow::Result<()> {
     // Before anything writes a byte. In release this is a GUI-subsystem binary
@@ -217,46 +211,25 @@ fn main() -> anyhow::Result<()> {
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Wait);
 
-    let rows = row_info(&sheet);
-    let mut playback = Playback::new(
-        Instant::now(),
-        cfg.playback.offset_secs,
-        rows,
-        sheet.default_row,
-        // Seeded from the wall clock so successive runs choreograph differently,
-        // but reported so a run can be reproduced from its log (spec §11.3's
-        // weighted random is otherwise impossible to debug by eye).
-        seed(),
-    );
-    if args.no_anticipate {
-        playback.toggle_anticipation();
-    }
+    // Seeded from the wall clock so successive runs choreograph differently, but
+    // reported so a run can be reproduced from its log (spec §11.3's weighted
+    // random is otherwise impossible to debug by eye).
+    let dancers = build_troupe(&cfg, &dir, &args, sheet, sheet_path, seed());
 
     // Built before the struct takes ownership of `dir`.
-    let watch = watch::Watch::new(&dir.join("config.toml"), &sheet_path)
+    let sheet_paths: Vec<PathBuf> = dancers.iter().map(|d| d.sheet_path.clone()).collect();
+    let watch = watch::Watch::new(&dir.join("config.toml"), &sheet_paths)
         .inspect_err(|e| tracing::warn!(error = %e, "no hot reload"))
         .ok();
 
     let mut app = App {
-        row: sheet.default_row,
-        sheet,
-        playback,
-        latency: LatencyMonitor::new(GRID_TICK),
+        dancers,
         cfg,
         dir,
         rx,
-        window: None,
-        hwnd: None,
-        surface: None,
-        cell: 0,
-        pos: (0, 0),
-        drag: None,
-        row_before_drag: None,
-        next_frame: Instant::now(),
         tray: None,
         tray_shown: None,
         watch,
-        sheet_path,
         sheets: Vec::new(),
         account: account::Status::Off,
         account_ch: account::Channel::new(),
@@ -264,6 +237,128 @@ fn main() -> anyhow::Result<()> {
     };
     event_loop.run_app(&mut app)?;
     Ok(())
+}
+
+/// Build the dancers `[dancers]` asks for (one, unless configured otherwise).
+///
+/// Dancer 0 always gets the sheet `run` already loaded and validated — the CLI
+/// override, or `[sprite] sheet` — so a troupe of one is byte-for-byte the app as
+/// it was before troupes existed. Later dancers draw from `[dancers] sheets`,
+/// cycling, or at random from the artwork folder when that list is empty; a name
+/// that fails to load falls back to dancer 0's sheet rather than to no dancer.
+///
+/// Every per-dancer random draw — sheet, size jitter, scheduler seed — derives
+/// from the one logged `seed`, so a troupe that looked wrong can be reproduced
+/// exactly from its log line.
+fn build_troupe(
+    cfg: &Config,
+    dir: &Path,
+    args: &cli::Args,
+    sheet: Sheet,
+    sheet_path: PathBuf,
+    seed: u64,
+) -> Vec<dancer::Dancer> {
+    let count = cfg.dancers.count();
+    let jitter = cfg.dancers.jitter();
+    let mut rng = XorShift::new(seed);
+
+    // Candidates for dancers beyond the first: the named list, or the folder.
+    let artwork = artwork_dir_of(cfg, dir);
+    let named: Vec<PathBuf> = cfg
+        .dancers
+        .sheets
+        .iter()
+        .map(|stem| artwork.join(format!("{stem}.png")))
+        .collect();
+    let pool: Vec<PathBuf> = if named.is_empty() {
+        sheets::list(&artwork)
+    } else {
+        named
+    };
+
+    let mut out = Vec::with_capacity(count);
+    for i in 0..count {
+        let (sheet_i, path_i) = if i == 0 {
+            (sheet.clone(), sheet_path.clone())
+        } else {
+            let want = if cfg.dancers.sheets.is_empty() {
+                // Random from the folder. The folder can be empty; fall through.
+                pool.get((rng.next() as usize) % pool.len().max(1)).cloned()
+            } else {
+                pool.get(i % pool.len()).cloned()
+            };
+            match want.map(|p| (Sheet::load(&p), p)) {
+                Some((Ok(s), p)) => (s, p),
+                Some((Err(e), p)) => {
+                    tracing::warn!(sheet = %p.display(), error = %e, "dancer sheet failed; using dancer 0's");
+                    (sheet.clone(), sheet_path.clone())
+                }
+                None => (sheet.clone(), sheet_path.clone()),
+            }
+        };
+
+        // 1 ± jitter, uniform. Multiplicative so "about half again as big" means
+        // the same thing at every base scale.
+        let spread = if jitter > 0.0 {
+            1.0 + jitter * (rng.unit() * 2.0 - 1.0)
+        } else {
+            1.0
+        };
+        let scale = (cfg.sprite.scale * spread).clamp(0.1, 8.0);
+
+        let mut playback = Playback::new(
+            Instant::now(),
+            cfg.playback.offset_secs,
+            row_info(&sheet_i),
+            sheet_i.default_row,
+            // A different stream per dancer, so a troupe picks different moves on
+            // the same downbeat — which is what makes it read as dancers together
+            // rather than one dancer copy-pasted.
+            seed.wrapping_add((i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)),
+        );
+        if args.no_anticipate {
+            playback.toggle_anticipation();
+        }
+
+        tracing::info!(dancer = i, sheet = %path_i.display(), scale, "dancer");
+        out.push(dancer::Dancer::new(sheet_i, path_i, playback, scale));
+    }
+    out
+}
+
+/// Where sheets live (spec §13's `artwork_dir`), before `App` exists.
+fn artwork_dir_of(cfg: &Config, dir: &Path) -> PathBuf {
+    let art = Path::new(&cfg.sprite.artwork_dir);
+    if art.is_absolute() {
+        art.to_path_buf()
+    } else {
+        dir.join(art)
+    }
+}
+
+/// A tiny deterministic generator for per-dancer draws.
+///
+/// Not `rand`: the scheduler already made the project's one randomness decision
+/// — seeded, logged, reproducible — and pulling a crate in for two draws per
+/// dancer per launch would be a second decision for no second reason.
+struct XorShift(u64);
+
+impl XorShift {
+    fn new(seed: u64) -> Self {
+        Self(seed | 1)
+    }
+    fn next(&mut self) -> u64 {
+        let mut x = self.0;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.0 = x;
+        x
+    }
+    /// Uniform in [0, 1).
+    fn unit(&mut self) -> f32 {
+        (self.next() >> 40) as f32 / (1u64 << 24) as f32
+    }
 }
 
 /// Does this invocation talk to a terminal rather than open a window?
@@ -700,29 +795,17 @@ fn spawn_poll(
 struct App {
     cfg: Config,
     dir: PathBuf,
-    sheet: Sheet,
-    playback: Playback,
-    latency: LatencyMonitor,
+    /// The troupe. Always at least one; index 0 is the "primary" dancer — the
+    /// one whose position is remembered, whose sheet cuts the tray icon and whose
+    /// state the tray reports.
+    dancers: Vec<dancer::Dancer>,
     rx: Receiver<AppEvent>,
-    window: Option<Window>,
-    hwnd: Option<HWND>,
-    surface: Option<Surface>,
-    row: usize,
-    cell: usize,
-    /// Top-left in physical screen pixels.
-    pos: (i32, i32),
-    /// Cursor-to-window offset captured at mouse-down.
-    drag: Option<(i32, i32)>,
-    row_before_drag: Option<usize>,
-    next_frame: Instant,
     /// `None` until `resumed`, and `None` for good if the shell refused it. A
     /// missing tray is a degraded UI, never a reason not to dance.
     tray: Option<tray::Tray>,
     /// `None` if the platform watcher could not start. Hot reload is a convenience;
     /// losing it must not stop the dancer.
     watch: Option<watch::Watch>,
-    /// Path the sheet was loaded from, so a reload knows what to re-read.
-    sheet_path: PathBuf,
     /// Sheets found in the artwork folder, as the tray lists them.
     sheets: Vec<PathBuf>,
     /// Yandex sign-in state, and the channel the worker reports through.
@@ -730,37 +813,13 @@ struct App {
     account_ch: account::Channel,
     /// What the tray menu was last told, so it is only rewritten on change.
     tray_shown: Option<tray::State>,
-    /// The last right-click menu shown, kept so its ids stay matchable: the
-    /// selection arrives on the shared menu channel after the popup closes.
-    context: Option<context::Context>,
+    /// The last right-click menu shown and which dancer it was shown on, kept so
+    /// its ids stay matchable: the selection arrives on the shared menu channel
+    /// after the popup closes.
+    context: Option<(usize, context::Context)>,
 }
 
 impl App {
-    fn frame_interval(&self) -> Duration {
-        // Derived from the *row*, not from a frame rate. `beats_per_loop` says what
-        // a pass through this row is worth musically, so the same idle tempo gives a
-        // four-beat resting pose twice the dwell of a two-beat step (spec §4.2).
-        self.cfg
-            .playback
-            .idle_frame_interval(self.beats_per_loop(), self.sheet.cells_per_row())
-    }
-
-    fn surface_size(&self) -> (u32, u32) {
-        surface_size(
-            self.sheet.cell_width,
-            self.sheet.cell_height,
-            self.cfg.sprite.scale,
-        )
-    }
-
-    /// Beats one pass through the current row occupies (spec §4.2).
-    fn beats_per_loop(&self) -> u32 {
-        self.sheet
-            .rows
-            .get(self.row)
-            .map_or(1, |r| r.beats_per_loop.max(1))
-    }
-
     /// Place the window from normalised config coordinates on the chosen monitor.
     fn initial_position(&self, el: &ActiveEventLoop, size: (u32, u32)) -> (i32, i32) {
         let mon = el
@@ -792,29 +851,33 @@ impl App {
         if self.tray.is_some() {
             return;
         }
-        // The default row's first cell: the pose the sheet author chose as its
-        // resting state, which is the one that reads as "this sheet".
-        let cell = self
-            .sheet
+        // Dancer 0's default row, first cell: the pose the sheet author chose as
+        // its resting state, which is the one that reads as "this sheet".
+        let sheet = &self.dancers[0].sheet;
+        let cell: Option<Vec<u32>> = sheet
             .rows
-            .get(self.sheet.default_row)
+            .get(sheet.default_row)
             .and_then(|r| r.cells.first())
-            .cloned();
+            .map(|c| c.to_vec());
         let Some(cell) = cell else {
             tracing::warn!("sheet has no cells; skipping the tray icon");
             return;
         };
+        let (cell_w, cell_h) = (sheet.cell_width, sheet.cell_height);
 
         // Rescanned on every build, so a sheet dropped into the folder appears
         // after any action that rebuilds the tray rather than only after a restart.
         self.sheets = sheets::list(&self.artwork_dir());
         let names: Vec<String> = self.sheets.iter().map(|p| sheets::label(p)).collect();
-        let current = self.sheets.iter().position(|p| *p == self.sheet_path);
+        let current = self
+            .sheets
+            .iter()
+            .position(|p| *p == self.dancers[0].sheet_path);
 
         match tray::Tray::new(
             &cell,
-            self.sheet.cell_width,
-            self.sheet.cell_height,
+            cell_w,
+            cell_h,
             &self.tray_state(),
             &names,
             current,
@@ -841,9 +904,13 @@ impl App {
             if let Some(action) = self.tray.as_ref().and_then(|t| t.action_for(ev.id())) {
                 tracing::info!(?action, "tray");
                 self.on_tray(action, el);
-            } else if let Some(action) = self.context.as_ref().and_then(|c| c.action_for(ev.id())) {
-                tracing::info!(?action, "context menu");
-                self.on_context(action, el);
+            } else if let Some((i, action)) = self
+                .context
+                .as_ref()
+                .and_then(|(i, c)| c.action_for(ev.id()).map(|a| (*i, a)))
+            {
+                tracing::info!(dancer = i, ?action, "context menu");
+                self.on_context(i, action, el);
             }
             if el.exiting() {
                 return;
@@ -856,8 +923,10 @@ impl App {
         match action {
             tray::Action::ToggleClickThrough => {
                 self.cfg.window.click_through = !self.cfg.window.click_through;
-                if let Some(hwnd) = self.hwnd {
-                    apply_window_styles(hwnd, self.cfg.window.click_through);
+                for d in &self.dancers {
+                    if let Some(hwnd) = d.hwnd {
+                        apply_window_styles(hwnd, self.cfg.window.click_through);
+                    }
                 }
                 // With the mouse passing through, the sprite cannot be clicked
                 // at all — the tray is now the only way back, which is exactly
@@ -868,16 +937,18 @@ impl App {
             }
             tray::Action::ToggleAlwaysOnTop => {
                 self.cfg.window.always_on_top = !self.cfg.window.always_on_top;
-                if let Some(w) = self.window.as_ref() {
-                    w.set_window_level(if self.cfg.window.always_on_top {
-                        WindowLevel::AlwaysOnTop
-                    } else {
-                        WindowLevel::Normal
-                    });
+                for d in &self.dancers {
+                    if let Some(w) = d.window.as_ref() {
+                        w.set_window_level(if self.cfg.window.always_on_top {
+                            WindowLevel::AlwaysOnTop
+                        } else {
+                            WindowLevel::Normal
+                        });
+                    }
                 }
             }
             tray::Action::ToggleAnticipation => {
-                self.playback.toggle_anticipation();
+                self.toggle_anticipation_all();
             }
             tray::Action::NudgeOffset(by) => self.set_offset(self.cfg.playback.offset_secs + by),
             tray::Action::ResetOffset => self.set_offset(config::Playback::default_offset()),
@@ -891,19 +962,34 @@ impl App {
                 account::sign_in(self.account_ch.tx.clone());
                 self.tray_shown = None;
             }
-            tray::Action::Quit => {
-                self.quit(el);
-                return;
-            }
+            tray::Action::Quit => self.quit(el),
         }
     }
 
-    fn on_context(&mut self, action: context::Action, el: &ActiveEventLoop) {
+    fn on_context(&mut self, dancer: usize, action: context::Action, el: &ActiveEventLoop) {
         match action {
-            context::Action::SetScale(s) => self.set_scale(s),
+            context::Action::SetScale(s) => {
+                if let Some(d) = self.dancers.get_mut(dancer) {
+                    d.set_scale(s, &self.cfg);
+                    tracing::info!(dancer, scale = s, "scale");
+                }
+                // Persisted only when there is one dancer: with a troupe on
+                // screen -- possibly jittered, possibly resized individually --
+                // no single number is "the" scale, and writing one would make
+                // the config lie. Chosen by eye, so written through immediately,
+                // same as the offset.
+                if self.dancers.len() == 1 {
+                    self.cfg.sprite.scale = s;
+                    if let Err(e) = self.cfg.save(&self.dir) {
+                        tracing::warn!(error = %e, "could not save the scale");
+                    }
+                }
+            }
             context::Action::ToggleMirror => {
                 self.cfg.sprite.mirror = !self.cfg.sprite.mirror;
-                self.draw();
+                for d in &mut self.dancers {
+                    d.draw(&self.cfg);
+                }
                 if let Err(e) = self.cfg.save(&self.dir) {
                     tracing::warn!(error = %e, "could not save mirror");
                 }
@@ -917,31 +1003,26 @@ impl App {
     /// Blocks until the menu closes; the selection lands on the menu channel and
     /// `drain_menus` picks it up on the next pass, which winit runs immediately
     /// after this handler returns.
-    fn show_context_menu(&mut self) {
-        let Some(hwnd) = self.hwnd else { return };
-        match context::Context::new(self.cfg.sprite.scale, self.cfg.sprite.mirror) {
+    fn show_context_menu(&mut self, dancer: usize) {
+        let Some(d) = self.dancers.get(dancer) else { return };
+        let Some(hwnd) = d.hwnd else { return };
+        match context::Context::new(d.scale, self.cfg.sprite.mirror) {
             Ok(ctx) => {
                 ctx.show(hwnd);
-                self.context = Some(ctx);
+                self.context = Some((dancer, ctx));
             }
             Err(e) => tracing::warn!(error = %e, "could not build the context menu"),
         }
     }
 
-    /// Set the sprite scale and persist it -- same contract as `set_offset`:
-    /// written through immediately, because it is chosen by eye and losing it to
-    /// a kill means choosing again.
-    fn set_scale(&mut self, scale: f32) {
-        let scale = scale.clamp(0.1, 8.0);
-        if (scale - self.cfg.sprite.scale).abs() < 1e-3 {
-            return;
+    /// Flip the A/B lead for the whole troupe at once: half a troupe
+    /// anticipating is neither arm of the experiment.
+    fn toggle_anticipation_all(&mut self) -> bool {
+        let mut on = false;
+        for d in &mut self.dancers {
+            on = d.playback.toggle_anticipation();
         }
-        self.cfg.sprite.scale = scale;
-        self.resize_surface();
-        tracing::info!(scale, "scale");
-        if let Err(e) = self.cfg.save(&self.dir) {
-            tracing::warn!(error = %e, "could not save the scale");
-        }
+        on
     }
 
     /// Move the output-latency offset (spec §9.2) and persist it.
@@ -956,7 +1037,9 @@ impl App {
         let secs = (secs * 1000.0).round() / 1000.0;
         let secs = secs.clamp(-1.0, 1.0);
         self.cfg.playback.offset_secs = secs;
-        self.playback.clock.set_offset(secs);
+        for d in &mut self.dancers {
+            d.playback.clock.set_offset(secs);
+        }
         tracing::info!(offset_ms = secs * 1000.0, "offset");
         if let Err(e) = self.cfg.save(&self.dir) {
             tracing::warn!(error = %e, "could not save the offset");
@@ -972,7 +1055,15 @@ impl App {
         for change in changes {
             match change {
                 watch::Change::Config => self.reload_config(),
-                watch::Change::Artwork => self.reload_sheet(),
+                watch::Change::Artwork => {
+                    // The watcher does not say whose sheet changed, and reloading
+                    // an unchanged one is a no-op that costs one PNG decode --
+                    // simpler than plumbing the path through and being wrong about
+                    // sidecar naming.
+                    for d in &mut self.dancers {
+                        d.reload_sheet(&self.cfg);
+                    }
+                }
             }
         }
     }
@@ -1004,16 +1095,18 @@ impl App {
         self.cfg.window.y = pos_y;
         self.cfg.window.monitor = monitor;
 
-        self.playback.clock.set_offset(self.cfg.playback.offset_secs);
-        if let Some(hwnd) = self.hwnd {
-            apply_window_styles(hwnd, self.cfg.window.click_through);
-        }
-        if let Some(win) = self.window.as_ref() {
-            win.set_window_level(if self.cfg.window.always_on_top {
-                WindowLevel::AlwaysOnTop
-            } else {
-                WindowLevel::Normal
-            });
+        for d in &mut self.dancers {
+            d.playback.clock.set_offset(self.cfg.playback.offset_secs);
+            if let Some(hwnd) = d.hwnd {
+                apply_window_styles(hwnd, self.cfg.window.click_through);
+            }
+            if let Some(win) = d.window.as_ref() {
+                win.set_window_level(if self.cfg.window.always_on_top {
+                    WindowLevel::AlwaysOnTop
+                } else {
+                    WindowLevel::Normal
+                });
+            }
         }
 
         tracing::info!(
@@ -1024,71 +1117,25 @@ impl App {
         );
 
         if sheet_changed {
-            self.sheet_path = self.cfg.sheet_path(&self.dir);
-            if let Some(w) = self.watch.as_mut() {
-                w.set_sheet(&self.sheet_path);
-            }
-            self.reload_sheet();
+            // `[sprite] sheet` names dancer 0's sheet; the rest keep whatever the
+            // troupe assignment gave them -- their sheets come from `[dancers]`,
+            // and re-rolling a random troupe on every config save would make
+            // editing an unrelated key reshuffle the screen.
+            let path = self.cfg.sheet_path(&self.dir);
+            self.dancers[0].sheet_path = path;
+            self.dancers[0].reload_sheet(&self.cfg);
+            self.reset_watch_sheets();
         } else if resize {
-            self.resize_surface();
+            // A hand-edited `[sprite] scale` resets every dancer to it, jitter
+            // included: the file was touched on purpose, and keeping stale jitter
+            // on top of a new base would make the edit look ignored.
+            let scale = self.cfg.sprite.scale;
+            for d in &mut self.dancers {
+                d.set_scale(scale, &self.cfg);
+            }
         }
         self.tray_shown = None;
         self.refresh_tray();
-    }
-
-    /// Re-read the sheet from disk.
-    ///
-    /// **A failed load keeps the sheet already in memory.** Saving a PNG is not
-    /// atomic in every editor, and a sheet swapped for an error would leave nothing
-    /// to draw — so a bad read is a warning and the dancer carries on with what it
-    /// had.
-    fn reload_sheet(&mut self) {
-        let sheet = match Sheet::load(&self.sheet_path) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!(
-                    sheet = %self.sheet_path.display(),
-                    error = %e,
-                    "reload failed; keeping the sheet already loaded"
-                );
-                return;
-            }
-        };
-
-        let resize = sheet.cell_width != self.sheet.cell_width
-            || sheet.cell_height != self.sheet.cell_height;
-
-        // Row indices belong to the old sheet and mean nothing in the new one.
-        self.row = sheet.default_row;
-        self.cell = 0;
-        self.row_before_drag = None;
-        self.sheet = sheet;
-
-        // The scheduler holds a description of rows that no longer exist, and moves
-        // planned against them.
-        self.playback.set_rows(row_info(&self.sheet), self.sheet.default_row);
-
-        tracing::info!(
-            sheet = %self.sheet_path.display(),
-            rows = self.sheet.rows.len(),
-            "artwork reloaded"
-        );
-
-        if resize {
-            self.resize_surface();
-        } else {
-            self.draw();
-        }
-    }
-
-    /// Rebuild the surface after the cell size or scale changed.
-    fn resize_surface(&mut self) {
-        let (w, h) = self.surface_size();
-        self.surface = Surface::new(w, h).ok();
-        if let Some(win) = self.window.as_ref() {
-            let _ = win.request_inner_size(PhysicalSize::new(w, h));
-        }
-        self.draw();
     }
 
     /// Where sheets live (spec §13's `artwork_dir`).
@@ -1105,13 +1152,15 @@ impl App {
     ///
     /// Written to the config immediately, because picking a dancer is a preference
     /// and not a session setting — the surprise would be it reverting on restart.
+    /// Switch the whole troupe to the sheet at this index of the tray's list.
+    ///
+    /// All dancers, deliberately: the tray is process-wide, and "which of the
+    /// five identical menu entries moves which dancer" is not a puzzle to hand
+    /// anyone. Per-dancer choice is what `[dancers] sheets` is for.
     fn select_sheet(&mut self, index: usize) {
         let Some(path) = self.sheets.get(index).cloned() else {
             return;
         };
-        if path == self.sheet_path {
-            return;
-        }
 
         // Relative when it sits in the artwork folder, so a config written here
         // stays portable if the whole folder moves.
@@ -1119,16 +1168,26 @@ impl App {
             Ok(rel) => rel.to_string_lossy().into_owned(),
             Err(_) => path.to_string_lossy().into_owned(),
         };
-        self.sheet_path = path;
-        if let Some(w) = self.watch.as_mut() {
-            w.set_sheet(&self.sheet_path);
+        for d in &mut self.dancers {
+            if d.sheet_path != path {
+                d.sheet_path = path.clone();
+                d.reload_sheet(&self.cfg);
+            }
         }
-        self.reload_sheet();
+        self.reset_watch_sheets();
         if let Err(e) = self.cfg.save(&self.dir) {
             tracing::warn!(error = %e, "could not save the chosen sheet");
         }
         // The tick moves to the new sheet, and the icon is cut from it.
         self.rebuild_tray();
+    }
+
+    /// Re-point the artwork watch at the sheets the troupe is actually wearing.
+    fn reset_watch_sheets(&mut self) {
+        let paths: Vec<PathBuf> = self.dancers.iter().map(|d| d.sheet_path.clone()).collect();
+        if let Some(w) = self.watch.as_mut() {
+            w.set_sheets(&paths);
+        }
     }
 
     /// Throw the tray away and build it again.
@@ -1244,9 +1303,12 @@ impl App {
 
     /// What the tray should be showing right now.
     fn tray_state(&self) -> tray::State {
+        // Dancer 0 speaks for the troupe: every playback consumes the same event
+        // stream, so their states only differ transiently.
+        let playback = &self.dancers[0].playback;
         tray::State {
-            state: self.playback.state.name().to_string(),
-            track: self.playback.track.as_ref().map(|t| {
+            state: playback.state.name().to_string(),
+            track: playback.track.as_ref().map(|t| {
                 if t.artist.is_empty() {
                     t.title.clone()
                 } else {
@@ -1255,7 +1317,7 @@ impl App {
             }),
             click_through: self.cfg.window.click_through,
             always_on_top: self.cfg.window.always_on_top,
-            anticipate: self.playback.anticipating(),
+            anticipate: playback.anticipating(),
             offset_secs: self.cfg.playback.offset_secs,
             yandex: account::status_line(&self.account),
         }
@@ -1287,22 +1349,25 @@ impl App {
         el.exit();
     }
 
+    /// Remember where dancer 0 sits. The rest are placed relative to it on the
+    /// next launch (see `resumed`).
     fn store_position(&mut self, el: &ActiveEventLoop) {
-        let size = self.surface_size();
+        let size = self.dancers[0].surface_size();
+        let pos = self.dancers[0].pos;
         let mut best: Option<(usize, f32, f32)> = None;
         for (i, m) in el.available_monitors().enumerate() {
             let (mp, ms) = (m.position(), m.size());
-            let inside = self.pos.0 >= mp.x
-                && self.pos.1 >= mp.y
-                && self.pos.0 < mp.x + ms.width as i32
-                && self.pos.1 < mp.y + ms.height as i32;
+            let inside = pos.0 >= mp.x
+                && pos.1 >= mp.y
+                && pos.0 < mp.x + ms.width as i32
+                && pos.1 < mp.y + ms.height as i32;
             if inside {
                 let span_x = (ms.width as i32 - size.0 as i32).max(1) as f32;
                 let span_y = (ms.height as i32 - size.1 as i32).max(1) as f32;
                 best = Some((
                     i,
-                    ((self.pos.0 - mp.x) as f32 / span_x).clamp(0.0, 1.0),
-                    ((self.pos.1 - mp.y) as f32 / span_y).clamp(0.0, 1.0),
+                    ((pos.0 - mp.x) as f32 / span_x).clamp(0.0, 1.0),
+                    ((pos.1 - mp.y) as f32 / span_y).clamp(0.0, 1.0),
                 ));
                 break;
             }
@@ -1314,55 +1379,6 @@ impl App {
         }
     }
 
-    /// Move the window through winit, so winit's cached geometry stays correct.
-    ///
-    /// `UpdateLayeredWindow` could do this in the same call that presents pixels,
-    /// but moving the window behind winit's back desyncs it and mouse input
-    /// eventually stops being delivered.
-    fn move_to(&mut self, pos: (i32, i32)) {
-        self.pos = pos;
-        if let Some(window) = self.window.as_ref() {
-            window.set_outer_position(PhysicalPosition::new(pos.0, pos.1));
-        }
-        self.draw();
-    }
-
-    fn draw(&mut self) {
-        let (Some(hwnd), Some(surface)) = (self.hwnd, self.surface.as_mut()) else {
-            return;
-        };
-        let row = &self.sheet.rows[self.row.min(self.sheet.rows.len() - 1)];
-        let Some(cell) = row.cells.get(self.cell % row.cells.len().max(1)) else {
-            return;
-        };
-        let (w, h) = surface_size(
-            self.sheet.cell_width,
-            self.sheet.cell_height,
-            self.cfg.sprite.scale,
-        );
-
-        surface.clear();
-        surface.blit_scaled(
-            cell,
-            self.sheet.cell_width,
-            self.sheet.cell_height,
-            w,
-            h,
-            self.cfg.sprite.mirror,
-        );
-
-        // Spec §11.2 says to measure display latency rather than assume 16 ms.
-        // This is the measurable half; see `dancer_render::latency` for what is
-        // not, and why that is acceptable.
-        let t0 = Instant::now();
-        if let Err(e) = present(hwnd, surface, self.cfg.sprite.opacity) {
-            tracing::error!(error = %e, "present failed");
-        }
-        self.latency.record(t0.elapsed());
-        self.playback
-            .set_render_latency(self.latency.render_latency().as_secs_f64());
-    }
-
     /// Drain the source thread's messages into the state machine.
     ///
     /// Draining here rather than waking the loop per message costs at most one
@@ -1370,228 +1386,101 @@ impl App {
     /// describes.
     fn drain_events(&mut self) {
         while let Ok(ev) = self.rx.try_recv() {
-            self.playback.apply(ev);
-        }
-    }
-
-    /// Advance the animation. Returns when the next tick is due.
-    ///
-    /// Two regimes, and the difference is the whole milestone: `Locked` reads the
-    /// cell out of the beat grid, so phase cannot drift; everything else counts
-    /// frames off a timer, which is M0's behaviour and is honest about knowing no
-    /// tempo (spec §10's `Unscored`).
-    fn tick(&mut self, now: Instant) -> Instant {
-        let cells = self.sheet.cells_per_row().max(1);
-
-        // Dragging owns the sprite: the Held row is a single pose, and letting the
-        // grid drive it would fight the interaction.
-        if self.drag.is_none() {
-            // Anticipation first: a scheduled move names both the row and the cell.
-            if let Some(f) = self.playback.frame(now) {
-                if f.row != self.row {
-                    // Log the lead: how far ahead of its target beat this move
-                    // began. That number *is* the milestone, so it should be
-                    // visible rather than inferred.
-                    if let Some(m) = self.playback.current_move() {
-                        tracing::debug!(
-                            row = %self.sheet.rows.get(f.row).map(|r| r.name.as_str()).unwrap_or("?"),
-                            lead_ms = ((m.target_beat - m.start_at) * 1000.0).round(),
-                            target_beat = m.target_beat,
-                            "move"
-                        );
-                    }
-                }
-                if f.row != self.row || f.cell != self.cell {
-                    self.row = f.row.min(self.sheet.rows.len().saturating_sub(1));
-                    self.cell = f.cell;
-                    self.draw();
-                }
-                return now + GRID_TICK;
-            }
-            // Nothing scheduled — a gap between moves, or anticipation off. Fall
-            // back to M1: loop the default row against the grid.
-            if let Some(cell) = self.playback.grid_cell(now, self.beats_per_loop(), cells) {
-                if self.row != self.sheet.default_row {
-                    self.row = self.sheet.default_row;
-                }
-                if cell != self.cell {
-                    self.cell = cell;
-                    self.draw();
-                }
-                return now + GRID_TICK;
+            // Broadcast: every dancer folds in the same observation against its
+            // own clock. The clones are cheap — scores travel as `Arc` — and the
+            // alternative, one shared clock, would only save them.
+            for d in &mut self.dancers {
+                d.playback.apply(ev.clone());
             }
         }
-
-        if now >= self.next_frame {
-            // No grid to follow: loop the idle row at a fixed rate. This is spec
-            // §10's `Unscored` — FAOSDance behaviour, honest about knowing no tempo
-            // — and it is also what runs when nothing is playing at all.
-            //
-            // The row matters. Falling back to `default_row` looked like a bug on FL
-            // Chan, whose `Waiting` pose is seven identical cells and one that
-            // differs by three pixels: the loop was running the whole time and
-            // rendering what appeared to be a single frame.
-            if self.drag.is_none() && self.row != self.sheet.idle_row {
-                self.row = self.sheet.idle_row;
-                self.cell = 0;
-            }
-            self.cell = (self.cell + 1) % cells;
-            self.draw();
-            // Advance from the scheduled time, not from now, so the loop does not
-            // drift slower than the configured rate.
-            self.next_frame += self.frame_interval();
-            if self.next_frame < now {
-                self.next_frame = now + self.frame_interval();
-            }
-        }
-        self.next_frame
-    }
-
-    fn begin_drag(&mut self) {
-        if self.drag.is_some() {
-            return;
-        }
-        let Some(cursor) = cursor_pos() else { return };
-        self.drag = Some((cursor.0 - self.pos.0, cursor.1 - self.pos.1));
-        tracing::debug!(
-            cursor = ?cursor,
-            pos = ?self.pos,
-            capture = ?self.hwnd.map(capture_owner),
-            "drag begin"
-        );
-
-        // Switch to the Held row, bypassing anything else. This is the one
-        // interaction that must feel immediate (spec §12).
-        if let Some(held) = self.sheet.held_row {
-            self.row_before_drag = Some(self.row);
-            self.row = held;
-            self.cell = 0;
-        }
-    }
-
-    fn end_drag(&mut self) {
-        if self.drag.take().is_none() {
-            return;
-        }
-        if let Some(prev) = self.row_before_drag.take() {
-            self.row = prev;
-            self.cell = 0;
-        }
-        // Resume on a timer boundary rather than mid-interval; the grid path
-        // re-derives its own cell on the next tick regardless.
-        self.next_frame = Instant::now();
-        if let Some(hwnd) = self.hwnd {
-            // Clicking never raises a WS_EX_NOACTIVATE window, so z-order lost
-            // during the drag would otherwise never come back.
-            reassert_topmost(hwnd);
-        }
-        tracing::debug!(
-            pos = ?self.pos,
-            state = self.playback.state.name(),
-            "drag end"
-        );
     }
 }
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, el: &ActiveEventLoop) {
-        if self.window.is_some() {
+        if self.dancers[0].window.is_some() {
             return;
         }
-        let (w, h) = self.surface_size();
 
-        let attrs = Window::default_attributes()
-            .with_title("dancer-rs")
-            .with_decorations(false)
-            .with_transparent(true)
-            .with_resizable(false)
-            // Must be created visible: `UpdateLayeredWindow` returns E_INVALIDARG
-            // against a window winit has not shown yet. No flash results — the
-            // window is transparent until the first present.
-            .with_window_level(if self.cfg.window.always_on_top {
-                WindowLevel::AlwaysOnTop
-            } else {
-                WindowLevel::Normal
-            })
-            .with_inner_size(PhysicalSize::new(w, h));
-
-        let window = match el.create_window(attrs) {
-            Ok(w) => w,
-            Err(e) => {
-                tracing::error!(error = %e, "creating window failed");
+        // Dancer 0 sits where the config remembers; the rest cascade to its right,
+        // one window-width apart, and stay wherever the user drags them. Only
+        // dancer 0's position is persisted -- the rest are placed relative to it
+        // on every launch, which survives monitor changes better than N saved
+        // positions that may refer to screens that no longer exist.
+        let size0 = self.dancers[0].surface_size();
+        let base = self.initial_position(el, size0);
+        let mut x = base.0;
+        for i in 0..self.dancers.len() {
+            let pos = (x, base.1);
+            let (w, h) = self.dancers[i].surface_size();
+            let cfg = &self.cfg;
+            if !self.dancers[i].create_window(el, cfg, pos) {
                 el.exit();
                 return;
             }
-        };
-        let hwnd = match hwnd_of(&window) {
-            Ok(h) => h,
-            Err(e) => {
-                tracing::error!(error = %e, "no Win32 handle");
-                el.exit();
-                return;
-            }
-        };
+            x += w as i32 + 12;
 
-        apply_window_styles(hwnd, self.cfg.window.click_through);
-        self.pos = self.initial_position(el, (w, h));
-        self.surface = Surface::new(w, h).ok();
-        self.hwnd = Some(hwnd);
-        window.set_outer_position(PhysicalPosition::new(self.pos.0, self.pos.1));
-        self.window = Some(window);
-
-        self.draw();
-
+            tracing::info!(
+                dancer = i,
+                w, h,
+                pos = ?pos,
+                sheet = %self.dancers[i].sheet_path.display(),
+                beats_per_loop = self.dancers[i].beats_per_loop(),
+                "window up"
+            );
+        }
         tracing::info!(
-            w, h,
-            pos = ?self.pos,
+            dancers = self.dancers.len(),
             idle_bpm = self.cfg.playback.idle_bpm,
             offset_secs = self.cfg.playback.offset_secs,
-            anticipate = self.playback.anticipating(),
-            beats_per_loop = self.beats_per_loop(),
+            anticipate = self.dancers[0].playback.anticipating(),
             click_through = self.cfg.window.click_through,
-            "window up"
+            "troupe up"
         );
         if self.cfg.window.click_through {
-            tracing::warn!("click_through is on: the window ignores the mouse, so it cannot be dragged or closed by clicking");
+            tracing::warn!("click_through is on: the windows ignore the mouse, so they cannot be dragged or closed by clicking");
         }
 
-        // After the window, because the icon is cut from the loaded sheet, and on
+        // After the windows, because the icon is cut from the loaded sheet, and on
         // the event-loop thread, because the tray owns a hidden message window that
         // has to be pumped by this loop.
         self.build_tray();
 
         // Checked at startup rather than at first use. A dead token otherwise
         // surfaces mid-track as a fetch that quietly does not happen, behind a
-        // dancer that carries on looking fine — see `account`.
+        // dancer that carries on looking fine -- see `account`.
         if !self.cfg.source.yandex.token.trim().is_empty() {
             self.account = account::Status::Checking;
             account::verify(self.cfg.source.yandex.token.clone(), self.account_ch.tx.clone());
         }
 
-        self.next_frame = Instant::now() + self.frame_interval();
-        el.set_control_flow(ControlFlow::WaitUntil(self.next_frame));
+        el.set_control_flow(ControlFlow::WaitUntil(Instant::now()));
     }
 
-    fn window_event(&mut self, el: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
+    fn window_event(&mut self, el: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        // Route by window: with a troupe up, every dancer raises its own events.
+        let Some(i) = self.dancers.iter().position(|d| d.window_id() == Some(id)) else {
+            return;
+        };
         match event {
             WindowEvent::CloseRequested => self.quit(el),
             WindowEvent::MouseInput { state, button, .. } => {
-                tracing::debug!(
-                    ?button,
-                    ?state,
-                    dragging = self.drag.is_some(),
-                    capture = ?self.hwnd.map(capture_owner),
-                    "mouse"
-                );
+                tracing::debug!(dancer = i, ?button, ?state, dragging = self.dancers[i].drag.is_some(), "mouse");
                 match (button, state) {
-                    (MouseButton::Left, ElementState::Pressed) => self.begin_drag(),
-                    (MouseButton::Left, ElementState::Released) => self.end_drag(),
+                    (MouseButton::Left, ElementState::Pressed) => {
+                        if let Some(cursor) = cursor_pos() {
+                            self.dancers[i].begin_drag(cursor);
+                        }
+                    }
+                    (MouseButton::Left, ElementState::Released) => self.dancers[i].end_drag(),
                     // The A/B switch (ROADMAP M3). Middle-click flips between
                     // anticipation and M1's plain loop on the same track, which is
-                    // the only way to judge the difference honestly — described,
+                    // the only way to judge the difference honestly -- described,
                     // it sounds like a detail; seen back to back, it is the point.
+                    // All dancers together: half a troupe anticipating is neither
+                    // arm of the experiment.
                     (MouseButton::Middle, ElementState::Pressed) => {
-                        let on = self.playback.toggle_anticipation();
+                        let on = self.toggle_anticipation_all();
                         tracing::info!(anticipate = on, "A/B toggle");
                     }
                     // A menu, not quit. Right-click-quit was M0's only control
@@ -1599,8 +1488,8 @@ impl ApplicationHandler for App {
                     // this menu, so the sprite alone still suffices when the shell
                     // refuses a tray icon -- one deliberate step instead of zero.
                     (MouseButton::Right, ElementState::Pressed) => {
-                        self.end_drag();
-                        self.show_context_menu();
+                        self.dancers[i].end_drag();
+                        self.show_context_menu(i);
                     }
                     _ => {}
                 }
@@ -1620,22 +1509,29 @@ impl ApplicationHandler for App {
 
         // While dragging, track the cursor in screen coordinates. Window-relative
         // events are useless here because the window moves with the pointer.
-        if self.drag.is_some() && !primary_button_down() {
-            // Belt and braces: capture should make a lost release impossible, but
-            // a wedged drag leaves the window glued to the cursor, which is bad
-            // enough to detect directly rather than trusting the event stream.
-            tracing::debug!("button released without a Released event; ending drag");
-            self.end_drag();
-        }
-        if let (Some(off), Some(cursor)) = (self.drag, cursor_pos()) {
-            let want = (cursor.0 - off.0, cursor.1 - off.1);
-            if want != self.pos {
-                self.move_to(want);
+        let button_down = primary_button_down();
+        let cursor = cursor_pos();
+        for d in &mut self.dancers {
+            if d.drag.is_some() && !button_down {
+                // Belt and braces: capture should make a lost release impossible,
+                // but a wedged drag leaves the window glued to the cursor, which is
+                // bad enough to detect directly rather than trusting the events.
+                tracing::debug!("button released without a Released event; ending drag");
+                d.end_drag();
+            }
+            if let (Some(off), Some(cursor)) = (d.drag, cursor) {
+                let want = (cursor.0 - off.0, cursor.1 - off.1);
+                if want != d.pos {
+                    d.move_to(want, &self.cfg);
+                }
             }
         }
 
         let now = Instant::now();
-        let next = self.tick(now);
+        let mut next = now + Duration::from_secs(3600);
+        for d in &mut self.dancers {
+            next = next.min(d.tick(now, &self.cfg));
+        }
         el.set_control_flow(ControlFlow::WaitUntil(next.max(now)));
     }
 }

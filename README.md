@@ -57,6 +57,20 @@ If it ever stops following your music, `dancer-rs.log` beside the executable say
 what it saw: which media session it followed, whether the track was recognised,
 and every state change.
 
+Right-click any dancer to resize or mirror it in place. And one dancer is only
+the default:
+
+```toml
+[dancers]
+count = 3            # a troupe
+sheets = []          # names per dancer; empty = random from the artwork folder
+scale_jitter = 0.3   # each dancer sized at scale x (1 +/- 0.3), once per launch
+```
+
+Every dancer follows the same beat grid but carries its own scheduler seed, so a
+troupe picks different moves on the same downbeat — dancing together, not
+copy-pasted.
+
 ## What syncs, and what does not
 
 Tracks you own and have analysed sync fully.

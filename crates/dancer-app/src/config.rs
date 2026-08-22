@@ -17,6 +17,7 @@ pub struct Config {
     pub playback: Playback,
     pub source: SourceCfg,
     pub library: LibraryCfg,
+    pub dancers: Dancers,
 }
 
 /// Where the user's own music lives (spec §8.3, §13).
@@ -179,7 +180,53 @@ impl Default for Config {
             playback: Playback::default(),
             source: SourceCfg::default(),
             library: LibraryCfg::default(),
+            dancers: Dancers::default(),
         }
+    }
+}
+
+/// A troupe instead of a single dancer (`[dancers]`).
+///
+/// All of this is presentation: every dancer shares the one clock, the one score
+/// and the one poll thread, and differs only in artwork, size and — because each
+/// gets its own scheduler seed — which move it picks on the same downbeat. That
+/// last part is what makes a troupe read as dancers *together* rather than one
+/// dancer copy-pasted.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Dancers {
+    /// How many dancers to run. 1 is the classic single sprite.
+    pub count: usize,
+    /// Sheet per dancer, by name as the tray shows it (the file stem). Shorter
+    /// lists cycle; an empty list means every dancer draws a random sheet from the
+    /// artwork folder when `count > 1`, and `[sprite] sheet` otherwise.
+    pub sheets: Vec<String>,
+    /// Random size spread, 0 to 0.75: each dancer's scale is drawn from
+    /// `[sprite] scale` times `1 ± scale_jitter`, once per launch. 0 means every
+    /// dancer is the same size.
+    pub scale_jitter: f32,
+}
+
+impl Default for Dancers {
+    fn default() -> Self {
+        Self {
+            count: 1,
+            sheets: Vec::new(),
+            scale_jitter: 0.0,
+        }
+    }
+}
+
+impl Dancers {
+    /// `count`, made safe: at least one dancer, and capped where a config typo
+    /// (`count = 100`) would otherwise open a hundred layered windows on a machine
+    /// that then has to be rebooted to get rid of them.
+    pub fn count(&self) -> usize {
+        self.count.clamp(1, 16)
+    }
+
+    pub fn jitter(&self) -> f32 {
+        self.scale_jitter.clamp(0.0, 0.75)
     }
 }
 
@@ -322,6 +369,44 @@ mod tests {
             let d = p.idle_frame_interval(2, 8);
             assert!(d.as_secs_f64() > 0.0 && d.as_secs_f64() < 10.0, "{bad} gave {d:?}");
         }
+    }
+
+    #[test]
+    fn a_troupe_of_zero_is_one_and_a_typo_of_a_hundred_is_sixteen() {
+        // `count = 0` means someone experimenting, not "no app"; `count = 100`
+        // means a typo, and a hundred layered windows is how a machine ends up
+        // needing a reboot to be usable again.
+        let mut d = Dancers::default();
+        assert_eq!(d.count(), 1);
+        d.count = 0;
+        assert_eq!(d.count(), 1);
+        d.count = 100;
+        assert_eq!(d.count(), 16);
+    }
+
+    #[test]
+    fn jitter_is_bounded_away_from_zero_sized_dancers() {
+        // 1 - jitter multiplies the base scale; at jitter = 1 a dancer could be
+        // scaled by zero, which renders as a dancer that vanished.
+        let mut d = Dancers {
+            scale_jitter: 2.0,
+            ..Dancers::default()
+        };
+        assert!(d.jitter() <= 0.75);
+        d.scale_jitter = -1.0;
+        assert_eq!(d.jitter(), 0.0);
+    }
+
+    #[test]
+    fn an_old_config_without_a_dancers_section_is_one_dancer() {
+        // Every config written before troupes existed must keep meaning what it
+        // meant: one dancer, no jitter.
+        let cfg: Config = toml::from_str("[sprite]
+scale = 1.0
+").unwrap();
+        assert_eq!(cfg.dancers.count(), 1);
+        assert_eq!(cfg.dancers.jitter(), 0.0);
+        assert!(cfg.dancers.sheets.is_empty());
     }
 
     #[test]

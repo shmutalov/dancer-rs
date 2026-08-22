@@ -43,7 +43,7 @@ pub struct Watch {
     _watcher: notify::RecommendedWatcher,
     rx: mpsc::Receiver<notify::Result<Event>>,
     config: PathBuf,
-    sheet: PathBuf,
+    sheets: Vec<PathBuf>,
     /// Pending changes and when their last event arrived.
     pending: Vec<(Change, Instant)>,
 }
@@ -54,11 +54,22 @@ impl Watch {
     /// Directories rather than files: an atomic save replaces the file, which
     /// destroys a watch registered on the inode. Watching the parent survives that,
     /// at the cost of having to filter events by path.
-    pub fn new(config: &Path, sheet: &Path) -> notify::Result<Self> {
+    pub fn new(config: &Path, sheets: &[PathBuf]) -> notify::Result<Self> {
         let (tx, rx) = mpsc::channel();
         let mut watcher = notify::recommended_watcher(tx)?;
 
-        for dir in [config.parent(), sheet.parent()].into_iter().flatten() {
+        // Each *distinct* parent once: a troupe usually draws every sheet from
+        // one artwork folder, and watching it N times would deliver N copies of
+        // every event.
+        let mut dirs: Vec<&Path> = config.parent().into_iter().collect();
+        for s in sheets {
+            if let Some(d) = s.parent() {
+                if !dirs.contains(&d) {
+                    dirs.push(d);
+                }
+            }
+        }
+        for dir in dirs {
             // A missing artwork directory is not fatal — the sheet may have been
             // given by absolute path, or the folder may appear later.
             if let Err(e) = watcher.watch(dir, RecursiveMode::NonRecursive) {
@@ -70,7 +81,7 @@ impl Watch {
             _watcher: watcher,
             rx,
             config: config.to_path_buf(),
-            sheet: sheet.to_path_buf(),
+            sheets: sheets.to_vec(),
             pending: Vec::new(),
         })
     }
@@ -109,16 +120,21 @@ impl Watch {
         if same_file(path, &self.config) {
             return Some(Change::Config);
         }
-        let stem = self.sheet.file_stem()?;
-        if path.parent() == self.sheet.parent() && path.file_stem() == Some(stem) {
-            return Some(Change::Artwork);
+        for sheet in &self.sheets {
+            let Some(stem) = sheet.file_stem() else { continue };
+            if path.parent() == sheet.parent() && path.file_stem() == Some(stem) {
+                return Some(Change::Artwork);
+            }
         }
         None
     }
 
-    /// Point the artwork watch at a different sheet, after the config named one.
-    pub fn set_sheet(&mut self, sheet: &Path) {
-        self.sheet = sheet.to_path_buf();
+    /// Point the artwork watch at a different set of sheets, after the config or
+    /// the tray named them. Only classification changes — the watched directories
+    /// were fixed at construction, which is fine while every sheet lives in the
+    /// artwork folder the tray offers them from.
+    pub fn set_sheets(&mut self, sheets: &[PathBuf]) {
+        self.sheets = sheets.to_vec();
     }
 }
 
@@ -145,7 +161,7 @@ mod tests {
             _watcher: notify::recommended_watcher(mpsc::channel().0).unwrap(),
             rx,
             config: PathBuf::from("C:/app/config.toml"),
-            sheet: PathBuf::from("C:/app/assets/dance.png"),
+            sheets: vec![PathBuf::from("C:/app/assets/dance.png")],
             pending: Vec::new(),
         }
     }
@@ -181,6 +197,20 @@ mod tests {
         let w = watch();
         assert_eq!(w.classify(Path::new("C:/app/assets/other.png")), None);
         assert_eq!(w.classify(Path::new("C:/app/scores.db")), None);
+    }
+
+    #[test]
+    fn every_dancers_sheet_counts_as_artwork() {
+        // A troupe loads several sheets; an edit to any of them must reload, or
+        // hot reload silently works for dancer 0 only.
+        let mut w = watch();
+        w.set_sheets(&[
+            PathBuf::from("C:/app/assets/dance.png"),
+            PathBuf::from("C:/app/assets/uma.png"),
+        ]);
+        assert_eq!(w.classify(Path::new("C:/app/assets/uma.toml")), Some(Change::Artwork));
+        assert_eq!(w.classify(Path::new("C:/app/assets/dance.png")), Some(Change::Artwork));
+        assert_eq!(w.classify(Path::new("C:/app/assets/other.png")), None);
     }
 
     #[test]

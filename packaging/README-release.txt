@@ -146,6 +146,21 @@ makes a recognition problem diagnosable -- so have a skim before sharing it. You
 Yandex token is never written there, and neither is your account name.
 
 
+More than one dancer
+--------------------
+
+    [dancers]
+    count = 3            # how many
+    sheets = []          # sheet names per dancer; empty picks at random from
+                         # the artwork folder (or uses [sprite] sheet alone)
+    scale_jitter = 0.3   # size spread: scale x (1 +/- 0.3), drawn once per launch
+
+Every dancer follows the same beat but chooses its own moves, so a troupe reads
+as dancers together rather than one dancer copied. Right-click any of them to
+resize or mirror it; drag them wherever you like. The first dancer's position is
+remembered, the rest line up beside it on the next start.
+
+
 Controls
 --------
 
