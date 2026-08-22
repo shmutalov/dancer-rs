@@ -1048,6 +1048,21 @@ impl App {
             tray::Action::ToggleAnticipation => {
                 self.toggle_anticipation_all();
             }
+            tray::Action::SetInterpolation(n) => {
+                self.cfg.sprite.interpolation = n;
+                tracing::info!(interpolation = n, "frame interpolation set");
+                if let Err(e) = self.cfg.save(&self.dir) {
+                    tracing::warn!(error = %e, "could not save interpolation");
+                }
+            }
+            tray::Action::ToggleGhost => {
+                let ghost = self.cfg.sprite.interpolation_style() != config::InterpolationStyle::Ghost;
+                self.cfg.sprite.interpolation_style = if ghost { "ghost" } else { "fade" }.into();
+                tracing::info!(ghost, "interpolation style toggled");
+                if let Err(e) = self.cfg.save(&self.dir) {
+                    tracing::warn!(error = %e, "could not save interpolation_style");
+                }
+            }
             tray::Action::NudgeOffset(by) => self.set_offset(self.cfg.playback.offset_secs + by),
             tray::Action::ResetOffset => self.set_offset(config::Playback::default_offset()),
             tray::Action::OpenDataDir => dialog::open_dir(&self.dir),
@@ -1543,6 +1558,8 @@ impl App {
             click_through: self.cfg.window.click_through,
             always_on_top: self.cfg.window.always_on_top,
             anticipate: playback.anticipating(),
+            interpolation: self.cfg.sprite.interpolation(),
+            ghost: self.cfg.sprite.interpolation_style() == config::InterpolationStyle::Ghost,
             offset_secs: self.cfg.playback.offset_secs,
             yandex: account::status_line(&self.account),
             dancers: self.dancers.len(),

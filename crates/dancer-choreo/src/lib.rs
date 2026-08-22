@@ -85,6 +85,10 @@ impl ScheduledMove {
 pub struct Frame {
     pub row: usize,
     pub cell: usize,
+    /// How far through `cell` the position is, `0.0..1.0`. The renderer's
+    /// optional frame interpolation reads this; nothing else does, and a caller
+    /// that only wants the cell can ignore it.
+    pub phase: f32,
 }
 
 pub struct Scheduler {
@@ -416,7 +420,9 @@ impl Scheduler {
             return None;
         }
 
-        let elapsed = ((position - m.start_at) / m.frame_duration) as usize;
+        let raw = (position - m.start_at) / m.frame_duration;
+        let elapsed = raw as usize;
+        let phase = raw.fract() as f32;
         if elapsed >= m.cells {
             if !m.loopable {
                 // Spec §11.3: non-loopable rows return to the default row.
@@ -426,11 +432,13 @@ impl Scheduler {
             return Some(Frame {
                 row: m.row,
                 cell: elapsed % m.cells,
+                phase,
             });
         }
         Some(Frame {
             row: m.row,
             cell: elapsed,
+            phase,
         })
     }
 }
@@ -1092,5 +1100,16 @@ mod tests {
         sch.plan(&s, 0.0);
         assert!(sch.queued() > 0);
         assert!(sch.frame_at(sch.queue.front().unwrap().start_at).is_some());
+    }
+
+    #[test]
+    fn frame_phase_runs_from_zero_to_one_within_a_cell() {
+        let s = score(0.55);
+        let mut sch = sched();
+        sch.plan(&s, 0.0);
+        let m = sch.queue.front().unwrap().clone();
+        let f = sch.frame_at(m.start_at + m.frame_duration * 1.25).unwrap();
+        assert_eq!(f.cell, 1);
+        assert!((f.phase - 0.25).abs() < 1e-5, "{}", f.phase);
     }
 }

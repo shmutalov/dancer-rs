@@ -29,7 +29,7 @@ use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event_loop::ActiveEventLoop;
 use winit::window::{Window, WindowId, WindowLevel};
 
-use crate::config::Config;
+use crate::config::{Config, InterpolationStyle};
 use crate::playback::Playback;
 
 /// Grid-driven states re-evaluate at this rate and redraw only when the cell
@@ -57,6 +57,12 @@ pub struct Dancer {
     pub drag: Option<(i32, i32)>,
     row_before_drag: Option<usize>,
     pub next_frame: Instant,
+    /// Which interpolated sub-frame of `cell` is showing, `0..interpolation`.
+    /// 0 is the cell itself, which is all any path without interpolation shows.
+    sub: u32,
+    /// The `(row, cell)` shown before the current one, for the ghost style.
+    /// Cleared by [`Dancer::snap`], so a drag or a sheet swap leaves no trail.
+    prev: Option<(usize, usize)>,
 }
 
 impl Dancer {
@@ -76,6 +82,8 @@ impl Dancer {
             drag: None,
             row_before_drag: None,
             next_frame: Instant::now(),
+            sub: 0,
+            prev: None,
         }
     }
 
@@ -158,14 +166,52 @@ impl Dancer {
         let (w, h) = surface_size(self.sheet.cell_width, self.sheet.cell_height, self.scale);
 
         surface.clear();
-        surface.blit_scaled(
-            cell,
-            self.sheet.cell_width,
-            self.sheet.cell_height,
-            w,
-            h,
-            cfg.sprite.mirror,
-        );
+        let (cw, ch, mirror) = (self.sheet.cell_width, self.sheet.cell_height, cfg.sprite.mirror);
+        let n = cfg.sprite.interpolation();
+        match cfg.sprite.interpolation_style() {
+            InterpolationStyle::Ghost => {
+                // The afterimage: the previous pose underneath, starting at
+                // `ghost_opacity` and gone by the end of the cell's sub-frames.
+                // Drawn even at x1, where it is a constant half-strength trail.
+                let prev = self
+                    .prev
+                    .and_then(|(r, c)| self.sheet.rows.get(r)?.cells.get(c));
+                if let Some(prev) = prev {
+                    let fade = 1.0 - self.sub as f32 / n as f32;
+                    surface.blit_scaled_faded(prev, cfg.sprite.ghost_opacity() * fade, cw, ch, w, h, mirror);
+                }
+                surface.blit_scaled(cell, cw, ch, w, h, mirror);
+            }
+            InterpolationStyle::Fade => {
+                // Sub-frame k of n is the cell faded k/n of the way to the next
+                // one. A one-shot row's last cell has no next and stays put.
+                let next = if self.sub > 0 && n > 1 {
+                    let i = self.cell + 1;
+                    if i < row.cells.len() {
+                        row.cells.get(i)
+                    } else if row.loopable {
+                        row.cells.first()
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                match next {
+                    Some(next) => surface.blit_scaled_blend(
+                        cell,
+                        next,
+                        self.sub as f32 / n as f32,
+                        cw,
+                        ch,
+                        w,
+                        h,
+                        mirror,
+                    ),
+                    None => surface.blit_scaled(cell, cw, ch, w, h, mirror),
+                }
+            }
+        }
 
         // Spec §11.2 says to measure display latency rather than assume 16 ms.
         // This is the measurable half; see `dancer_render::latency` for what is
@@ -177,6 +223,34 @@ impl Dancer {
         self.latency.record(t0.elapsed());
         self.playback
             .set_render_latency(self.latency.render_latency().as_secs_f64());
+    }
+
+    /// Show `row`/`cell`, `phase` of the way through it. Returns whether the
+    /// screen needs redrawing — on a cell change, and on each interpolated
+    /// sub-frame within the cell when `[sprite] interpolation` is above 1.
+    ///
+    /// Redraws are bounded by the setting, not by the tick: `n` presents per
+    /// cell however fast the caller polls.
+    fn set_frame(&mut self, row: usize, cell: usize, phase: f32, cfg: &Config) -> bool {
+        let row = row.min(self.sheet.rows.len().saturating_sub(1));
+        let n = cfg.sprite.interpolation();
+        let sub = ((phase.clamp(0.0, 1.0) * n as f32) as u32).min(n - 1);
+        let changed = row != self.row || cell != self.cell;
+        if changed {
+            self.prev = Some((self.row, self.cell));
+            self.row = row;
+            self.cell = cell;
+        }
+        let redraw = changed || sub != self.sub;
+        self.sub = sub;
+        redraw
+    }
+
+    /// Back to the cell itself, no sub-frame and no trail. For pose changes
+    /// that are not animation — a drag, a new sheet.
+    fn snap(&mut self) {
+        self.sub = 0;
+        self.prev = None;
     }
 
     /// Advance the animation. Returns when this dancer's next tick is due.
@@ -206,21 +280,17 @@ impl Dancer {
                         );
                     }
                 }
-                if f.row != self.row || f.cell != self.cell {
-                    self.row = f.row.min(self.sheet.rows.len().saturating_sub(1));
-                    self.cell = f.cell;
+                if self.set_frame(f.row, f.cell, f.phase, cfg) {
                     self.draw(cfg);
                 }
                 return now + GRID_TICK;
             }
             // Nothing scheduled — a gap between moves, or anticipation off. Fall
             // back to M1: loop the default row against the grid.
-            if let Some(cell) = self.playback.grid_cell(now, self.beats_per_loop(), cells) {
-                if self.row != self.sheet.default_row {
-                    self.row = self.sheet.default_row;
-                }
-                if cell != self.cell {
-                    self.cell = cell;
+            if let Some((cell, phase)) =
+                self.playback.grid_frame(now, self.beats_per_loop(), cells)
+            {
+                if self.set_frame(self.sheet.default_row, cell, phase, cfg) {
                     self.draw(cfg);
                 }
                 return now + GRID_TICK;
@@ -236,11 +306,12 @@ impl Dancer {
             // Chan, whose `Waiting` pose is seven identical cells and one that
             // differs by three pixels: the loop was running the whole time and
             // rendering what appeared to be a single frame.
-            if self.drag.is_none() && self.row != self.sheet.idle_row {
-                self.row = self.sheet.idle_row;
-                self.cell = 0;
-            }
-            self.cell = (self.cell + 1) % cells;
+            let (row, cell) = if self.drag.is_none() && self.row != self.sheet.idle_row {
+                (self.sheet.idle_row, 1 % cells)
+            } else {
+                (self.row, (self.cell + 1) % cells)
+            };
+            self.set_frame(row, cell, 0.0, cfg);
             self.draw(cfg);
             // Advance from the scheduled time, not from now, so the loop does not
             // drift slower than the configured rate.
@@ -248,6 +319,22 @@ impl Dancer {
             if self.next_frame < now {
                 self.next_frame = now + self.frame_interval(cfg);
             }
+        } else if cfg.sprite.interpolation() > 1 {
+            // Between timer frames: the phase is how far into the interval we
+            // are, and sub-frames need ticks finer than the interval itself.
+            let interval = self.frame_interval(cfg).as_secs_f64();
+            let remaining = (self.next_frame - now).as_secs_f64();
+            let phase = (1.0 - remaining / interval.max(1e-6)).clamp(0.0, 1.0) as f32;
+            if self.set_frame(self.row, self.cell, phase, cfg) {
+                self.draw(cfg);
+            }
+        }
+        let n = cfg.sprite.interpolation();
+        if n > 1 {
+            // Wake for the next sub-frame, not for every grid tick.
+            let step = self.frame_interval(cfg) / n;
+            let next_sub = self.next_frame - step * (n - 1 - self.sub.min(n - 1));
+            return next_sub.max(now + GRID_TICK).min(self.next_frame);
         }
         self.next_frame
     }
@@ -270,6 +357,7 @@ impl Dancer {
             self.row_before_drag = Some(self.row);
             self.row = held;
             self.cell = 0;
+            self.snap();
         }
     }
 
@@ -280,6 +368,7 @@ impl Dancer {
         if let Some(prev) = self.row_before_drag.take() {
             self.row = prev;
             self.cell = 0;
+            self.snap();
         }
         // Resume on a timer boundary rather than mid-interval; the grid path
         // re-derives its own cell on the next tick regardless.
@@ -342,6 +431,7 @@ impl Dancer {
 
         self.row = sheet.default_row;
         self.cell = 0;
+        self.snap();
         self.row_before_drag = None;
         self.sheet = sheet;
         self.sheet_path = path;

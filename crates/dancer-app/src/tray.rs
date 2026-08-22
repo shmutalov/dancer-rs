@@ -28,6 +28,10 @@ pub enum Action {
     ToggleClickThrough,
     ToggleAlwaysOnTop,
     ToggleAnticipation,
+    /// `[sprite] interpolation`: sub-frames per cell; 1 is off.
+    SetInterpolation(u32),
+    /// `[sprite] interpolation_style`: flip between fade and ghost.
+    ToggleGhost,
     /// Shift the output-latency offset by this many seconds (spec §9.2).
     NudgeOffset(f64),
     ResetOffset,
@@ -48,6 +52,9 @@ pub enum Action {
     SetLanguage(crate::i18n::Lang),
     Quit,
 }
+
+/// The interpolation choices the tray offers; the config accepts any 1–16.
+pub const INTERPOLATION: &[u32] = &[1, 2, 4, 8];
 
 /// Offset step per nudge, in seconds.
 ///
@@ -71,6 +78,10 @@ pub struct State {
     pub click_through: bool,
     pub always_on_top: bool,
     pub anticipate: bool,
+    /// Sub-frames per cell, as `[sprite] interpolation` reads after clamping.
+    pub interpolation: u32,
+    /// Whether the ghost (afterimage) style is on rather than the fade.
+    pub ghost: bool,
     pub offset_secs: f64,
     pub yandex: String,
     /// How many dancers are on screen right now.
@@ -86,6 +97,9 @@ pub struct Tray {
     click_through: CheckMenuItem,
     always_on_top: CheckMenuItem,
     anticipate: CheckMenuItem,
+    /// One per entry of `INTERPOLATION`, ticked like radio buttons.
+    interpolation: Vec<CheckMenuItem>,
+    ghost: CheckMenuItem,
     /// Greyed out while there is one dancer: removing it is what Quit is for.
     remove_last: MenuItem,
     yandex: MenuItem,
@@ -96,6 +110,8 @@ struct Ids {
     click_through: MenuId,
     always_on_top: MenuId,
     anticipate: MenuId,
+    interpolation: Vec<MenuId>,
+    ghost: MenuId,
     minus_coarse: MenuId,
     minus_fine: MenuId,
     plus_fine: MenuId,
@@ -138,6 +154,19 @@ impl Tray {
         let click_through_item = CheckMenuItem::new(s.click_through, true, now.click_through, None);
         let always_on_top_item = CheckMenuItem::new(s.always_on_top, true, now.always_on_top, None);
         let anticipate_item = CheckMenuItem::new(s.anticipate, true, now.anticipate, None);
+
+        // Radio-style: the application sets the ticks from the config on every
+        // refresh, so they cannot drift from what is actually drawn.
+        let interpolation = Submenu::new(s.interpolation, true);
+        let mut interpolation_items = Vec::with_capacity(INTERPOLATION.len());
+        for &n in INTERPOLATION {
+            let label = if n == 1 { s.interpolation_off.to_string() } else { format!("x{n}") };
+            let item = CheckMenuItem::new(label, true, n == now.interpolation, None);
+            interpolation.append(&item)?;
+            interpolation_items.push(item);
+        }
+        let ghost_item = CheckMenuItem::new(s.ghost_trail, true, now.ghost, None);
+        interpolation.append_items(&[&PredefinedMenuItem::separator(), &ghost_item])?;
 
         let minus_coarse = MenuItem::new(s.offset_minus_coarse, true, None);
         let minus_fine = MenuItem::new(s.offset_minus_fine, true, None);
@@ -205,6 +234,8 @@ impl Tray {
             click_through: click_through_item.id().clone(),
             always_on_top: always_on_top_item.id().clone(),
             anticipate: anticipate_item.id().clone(),
+            interpolation: interpolation_items.iter().map(|i| i.id().clone()).collect(),
+            ghost: ghost_item.id().clone(),
             minus_coarse: minus_coarse.id().clone(),
             minus_fine: minus_fine.id().clone(),
             plus_fine: plus_fine.id().clone(),
@@ -230,6 +261,7 @@ impl Tray {
             &click_through_item,
             &always_on_top_item,
             &anticipate_item,
+            &interpolation,
             &PredefinedMenuItem::separator(),
             &offset_label,
             &minus_coarse,
@@ -259,6 +291,8 @@ impl Tray {
             click_through: click_through_item,
             always_on_top: always_on_top_item,
             anticipate: anticipate_item,
+            interpolation: interpolation_items,
+            ghost: ghost_item,
             remove_last,
             yandex: yandex_item,
             ids,
@@ -279,6 +313,10 @@ impl Tray {
             Action::ToggleAlwaysOnTop
         } else if *id == self.ids.anticipate {
             Action::ToggleAnticipation
+        } else if let Some(i) = self.ids.interpolation.iter().position(|s| s == id) {
+            Action::SetInterpolation(INTERPOLATION[i])
+        } else if *id == self.ids.ghost {
+            Action::ToggleGhost
         } else if *id == self.ids.minus_coarse {
             Action::NudgeOffset(-NUDGE_COARSE)
         } else if *id == self.ids.minus_fine {
@@ -329,6 +367,10 @@ impl Tray {
         self.click_through.set_checked(now.click_through);
         self.always_on_top.set_checked(now.always_on_top);
         self.anticipate.set_checked(now.anticipate);
+        for (item, &n) in self.interpolation.iter().zip(INTERPOLATION) {
+            item.set_checked(n == now.interpolation);
+        }
+        self.ghost.set_checked(now.ghost);
         self.remove_last.set_enabled(now.dancers > 1);
     }
 }

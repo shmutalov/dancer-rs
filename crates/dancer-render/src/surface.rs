@@ -106,6 +106,76 @@ impl Surface {
         dst_h: u32,
         mirror: bool,
     ) {
+        self.blit_with(cell_w, cell_h, dst_w, dst_h, mirror, |i| cell[i]);
+    }
+
+    /// Blit a dissolve between two cells of the same size: `t = 0` is all
+    /// `from`, `t = 1` is all `to`.
+    ///
+    #[allow(clippy::too_many_arguments)]
+    /// A per-pixel lerp of premultiplied colour *is* the correct dissolve — the
+    /// alpha fades along with the colour, so a limb that exists in one pose and
+    /// not the other fades rather than popping. What it is not is motion: both
+    /// poses are visible at once in between, which is the trade-off the caller's
+    /// `blend` setting opts into.
+    pub fn blit_scaled_blend(
+        &mut self,
+        from: &[u32],
+        to: &[u32],
+        t: f32,
+        cell_w: u32,
+        cell_h: u32,
+        dst_w: u32,
+        dst_h: u32,
+        mirror: bool,
+    ) {
+        if from.len() != to.len() {
+            return self.blit_scaled(to, cell_w, cell_h, dst_w, dst_h, mirror);
+        }
+        let w = (t.clamp(0.0, 1.0) * 256.0).round() as u32;
+        match w {
+            0 => self.blit_scaled(from, cell_w, cell_h, dst_w, dst_h, mirror),
+            256 => self.blit_scaled(to, cell_w, cell_h, dst_w, dst_h, mirror),
+            _ => self.blit_with(cell_w, cell_h, dst_w, dst_h, mirror, |i| {
+                lerp_premultiplied(from[i], to[i], w)
+            }),
+        }
+    }
+
+    /// Blit a cell at a fraction of its opacity, `0.0..=1.0`.
+    #[allow(clippy::too_many_arguments)]
+    ///
+    /// Premultiplied, so scaling every channel by the weight is the whole job:
+    /// colour and coverage fade together, which is what a ghost should do.
+    pub fn blit_scaled_faded(
+        &mut self,
+        cell: &[u32],
+        opacity: f32,
+        cell_w: u32,
+        cell_h: u32,
+        dst_w: u32,
+        dst_h: u32,
+        mirror: bool,
+    ) {
+        let w = (opacity.clamp(0.0, 1.0) * 256.0).round() as u32;
+        match w {
+            0 => {}
+            256 => self.blit_scaled(cell, cell_w, cell_h, dst_w, dst_h, mirror),
+            _ => self.blit_with(cell_w, cell_h, dst_w, dst_h, mirror, |i| {
+                lerp_premultiplied(0, cell[i], w)
+            }),
+        }
+    }
+
+    fn blit_with(
+        &mut self,
+        cell_w: u32,
+        cell_h: u32,
+        dst_w: u32,
+        dst_h: u32,
+        mirror: bool,
+        sample: impl Fn(usize) -> u32,
+    ) {
         if cell_w == 0 || cell_h == 0 || dst_w == 0 || dst_h == 0 {
             return;
         }
@@ -121,7 +191,7 @@ impl Surface {
             for x in 0..dst_w.min(sw.saturating_sub(ox)) {
                 let sx = (x as u64 * cell_w as u64 / dst_w as u64) as u32;
                 let sx = if mirror { cell_w - 1 - sx } else { sx };
-                let s = cell[src_row + sx as usize];
+                let s = sample(src_row + sx as usize);
                 if s >> 24 == 0 {
                     continue; // fully transparent, nothing to compose
                 }
@@ -134,6 +204,16 @@ impl Surface {
             }
         }
     }
+}
+
+/// `a + (b − a) · w/256`, per channel, on premultiplied BGRA.
+fn lerp_premultiplied(a: u32, b: u32, w: u32) -> u32 {
+    let chan = |shift: u32| {
+        let x = (a >> shift) & 0xff;
+        let y = (b >> shift) & 0xff;
+        ((x * (256 - w) + y * w + 128) >> 8).min(255)
+    };
+    (chan(24) << 24) | (chan(16) << 16) | (chan(8) << 8) | chan(0)
 }
 
 /// Porter-Duff source-over for premultiplied BGRA packed in a `u32`.
@@ -181,7 +261,7 @@ pub fn client_size(hwnd: HWND) -> (u32, u32) {
 
 #[cfg(test)]
 mod tests {
-    use super::over_premultiplied;
+    use super::{lerp_premultiplied, over_premultiplied};
 
     #[test]
     fn opaque_source_replaces_destination() {
@@ -200,5 +280,16 @@ mod tests {
         // Premultiplied half-alpha white over opaque black.
         let out = over_premultiplied(0x80_80_80_80, 0xFF_00_00_00);
         assert_eq!(out >> 24, 255, "alpha must saturate, not wrap");
+    }
+
+    #[test]
+    fn lerp_endpoints_are_exact_and_the_middle_fades_alpha_too() {
+        let a = 0xFF_10_20_30;
+        let b = 0x00_00_00_00;
+        assert_eq!(lerp_premultiplied(a, b, 0), a);
+        assert_eq!(lerp_premultiplied(a, b, 256), b);
+        let mid = lerp_premultiplied(a, b, 128);
+        assert_eq!(mid >> 24, 0x80, "a pose that vanishes should fade, not pop");
+        assert_eq!((mid >> 16) & 0xff, 0x08);
     }
 }

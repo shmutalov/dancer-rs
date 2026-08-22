@@ -221,13 +221,20 @@ impl Playback {
     /// Derived from the grid rather than accumulated per frame, so it cannot drift:
     /// a dropped frame skips a cell instead of shifting the phase. Returns `None`
     /// when there is no grid to read, which is every non-`Locked` state.
+    #[cfg(test)]
     pub fn grid_cell(&self, now: Instant, beats_per_loop: u32, cells: usize) -> Option<usize> {
+        self.grid_frame(now, beats_per_loop, cells).map(|(cell, _)| cell)
+    }
+
+    /// [`Playback::grid_cell`] plus how far through that cell the grid is,
+    /// `0.0..1.0`, for the renderer's optional frame interpolation.
+    pub fn grid_frame(&self, now: Instant, beats_per_loop: u32, cells: usize) -> Option<(usize, f32)> {
         if !self.state.is_grid_driven() || cells == 0 {
             return None;
         }
         let score = self.clock.score()?;
-        let progress = score.loop_progress(self.clock.position(now), beats_per_loop)?;
-        Some(((progress * cells as f64) as usize).min(cells - 1))
+        let raw = score.loop_progress(self.clock.position(now), beats_per_loop)? * cells as f64;
+        Some(((raw as usize).min(cells - 1), raw.fract() as f32))
     }
 
     /// The row and cell to show at `now`, from the anticipation scheduler.

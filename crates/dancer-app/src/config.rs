@@ -158,7 +158,54 @@ pub struct Sprite {
     pub scale: f32,
     pub mirror: bool,
     pub opacity: f32,
+    /// Frame interpolation: sub-frames drawn per sheet cell (the tray's
+    /// "Frame interpolation" menu). `1` is off — the sheet's cells, as drawn.
+    /// `2` inserts one in-between image per cell, `4` inserts three, and so on,
+    /// each a cross-fade between the current cell and the next. An 8-cell row
+    /// at 60 BPM is 4 fps on its own and 16 fps at `4`.
+    ///
+    /// It is a dissolve, not motion — limbs do not travel, they fade — so it
+    /// takes the hard edge off a slow frame change at the cost of a visible
+    /// ghost on high-contrast pixel art. Off by default for that reason.
+    pub interpolation: u32,
+    /// How the in-between frames are built: `"fade"` dissolves the cell into
+    /// the next one; `"ghost"` keeps the cell solid and leaves the previous
+    /// pose underneath as a fading afterimage, the motion-trail look.
+    pub interpolation_style: String,
+    /// Opacity the afterimage starts at in `"ghost"` style, 0 to 1. It fades to
+    /// nothing across the cell's sub-frames.
+    pub ghost_opacity: f32,
+}
 
+/// How [`Sprite::interpolation`] draws its in-between frames.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InterpolationStyle {
+    /// Cross-fade toward the next cell: both poses half-visible in the middle.
+    Fade,
+    /// The current cell solid, the previous one fading out beneath it.
+    Ghost,
+}
+
+impl Sprite {
+    /// `interpolation_style`, parsed; anything unrecognised is `Fade`, since a
+    /// typo should not silently turn the setting off.
+    pub fn interpolation_style(&self) -> InterpolationStyle {
+        match self.interpolation_style.trim().to_ascii_lowercase().as_str() {
+            "ghost" | "trail" => InterpolationStyle::Ghost,
+            _ => InterpolationStyle::Fade,
+        }
+    }
+
+    pub fn ghost_opacity(&self) -> f32 {
+        self.ghost_opacity.clamp(0.0, 1.0)
+    }
+
+    /// `interpolation`, made safe: at least 1, and capped where a typo would
+    /// otherwise redraw every dancer hundreds of times a second for no visible
+    /// gain — sixteen steps is already below what the eye separates.
+    pub fn interpolation(&self) -> u32 {
+        self.interpolation.clamp(1, 16)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -256,6 +303,9 @@ impl Default for Sprite {
             scale: 1.0,
             mirror: false,
             opacity: 1.0,
+            interpolation: 1,
+            interpolation_style: "fade".into(),
+            ghost_opacity: 0.5,
         }
     }
 }

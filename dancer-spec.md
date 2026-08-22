@@ -1167,6 +1167,14 @@ artwork_dir = "C:\\Users\\me\\Documents\\dancer\\artwork"
 scale = 1.0
 mirror = false
 opacity = 1.0
+# Frame interpolation: sub-frames per sheet cell. 1 is off; 2/4/8 insert
+# cross-faded in-between images, so an 8-cell row at 60 BPM goes from 4 fps to
+# 16 fps at 4. A dissolve, not motion: a faint ghost on hard-edged pixel art.
+interpolation = 1
+# "fade" dissolves toward the next cell; "ghost" keeps the pose solid and
+# leaves the previous one fading out underneath — a motion trail.
+interpolation_style = "fade"
+ghost_opacity = 0.5
 # Row looped when there is no grid. Defaults to `default_row`, which is wrong for
 # a sheet whose resting pose is a still image — see §10.
 idle_row = "Stepping"
