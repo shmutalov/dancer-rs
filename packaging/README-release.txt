@@ -149,19 +149,22 @@ Yandex token is never written there, and neither is your account name.
 More than one dancer
 --------------------
 
+Tray menu -> Dancers -> Add dancer, then pick a sheet (or Random). The new
+dancer appears beside the others and joins the song already playing. Right-click
+any dancer to change its sheet, resize it, duplicate it, or remove it.
+
+What you build is saved, so the next start rebuilds the same troupe. The same
+thing by hand:
+
     [dancers]
-    count = 3            # how many
-    sheets = []          # sheet names per dancer; empty picks at random from
-                         # the artwork folder (or uses [sprite] sheet alone)
+    count = 3
+    sheets = ["flchan/Dance_Large", "polish-cow/PolishCow", "banana/Banana"]
     scale_jitter = 0.3   # size spread: scale x (1 +/- 0.3), drawn once per launch
 
-Or skip the file: the tray menu, under Dancer, has the count too, and it applies
-immediately -- new dancers join the song already playing.
-
-Every dancer follows the same beat but chooses its own moves, so a troupe reads
-as dancers together rather than one dancer copied. Right-click any of them to
-resize or mirror it; drag them wherever you like. The first dancer's position is
-remembered, the rest line up beside it on the next start.
+An empty sheets list means each dancer beyond the first picks at random from the
+artwork folder. Every dancer follows the same beat but chooses its own moves, so
+a troupe reads as dancers together rather than one dancer copied. The first
+dancer's position is remembered; the rest line up beside it on the next start.
 
 
 Controls
@@ -169,7 +172,7 @@ Controls
 
   Left drag        move the dancer
   Middle click     toggle anticipation (the A/B — try it on a chorus)
-  Right click      menu: size, mirror, quit
+  Right click      this dancer: sheet, size, mirror, duplicate, remove; quit
   Tray menu        everything else
 
 If you turn on click-through, the sprite stops receiving the mouse entirely, so

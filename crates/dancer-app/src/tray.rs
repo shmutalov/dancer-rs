@@ -30,10 +30,11 @@ pub enum Action {
     NudgeOffset(f64),
     ResetOffset,
     OpenDataDir,
-    /// Switch to the sheet at this index of the list the tray was built with.
-    SelectSheet(usize),
-    /// Run this many dancers (ROADMAP: troupe). Applied live.
-    SetDancerCount(usize),
+    /// Add a dancer wearing the sheet at this index of the list the tray was
+    /// built with; `None` picks one at random from the artwork folder.
+    AddDancer(Option<usize>),
+    /// Close the most recently added dancer. Never the last one.
+    RemoveLastDancer,
     OpenArtworkDir,
     /// Show the "where do dancers come from" help.
     SheetHelp,
@@ -43,13 +44,6 @@ pub enum Action {
     YandexSignIn,
     Quit,
 }
-
-/// The troupe sizes on offer.
-///
-/// A ladder for the same reason the context menu's scales are one: `muda` has no
-/// number input, and these cover every count a desktop can hold with dignity.
-/// `[dancers] count` in the config still goes to 16.
-pub const COUNTS: &[usize] = &[1, 2, 3, 4, 5, 6, 8];
 
 /// Offset step per nudge, in seconds.
 ///
@@ -88,8 +82,8 @@ pub struct Tray {
     click_through: CheckMenuItem,
     always_on_top: CheckMenuItem,
     anticipate: CheckMenuItem,
-    /// One per entry of [`COUNTS`]; exactly the current one is ticked.
-    counts: Vec<CheckMenuItem>,
+    /// Greyed out while there is one dancer: removing it is what Quit is for.
+    remove_last: MenuItem,
     yandex: MenuItem,
     ids: Ids,
 }
@@ -104,12 +98,14 @@ struct Ids {
     plus_coarse: MenuId,
     reset_offset: MenuId,
     open_dir: MenuId,
-    /// One per entry of the sheet list, in the order it was given.
-    sheets: Vec<MenuId>,
+    /// One per entry of the sheet list, in the order it was given: "add a
+    /// dancer wearing this".
+    add: Vec<MenuId>,
+    add_random: MenuId,
+    remove_last: MenuId,
     open_artwork: MenuId,
     sheet_help: MenuId,
     sources: Vec<MenuId>,
-    counts: Vec<MenuId>,
     yandex_sign_in: MenuId,
     quit: MenuId,
 }
@@ -123,7 +119,6 @@ impl Tray {
         height: u32,
         now: &State,
         sheets: &[String],
-        current_sheet: Option<usize>,
         sources: &[&str],
     ) -> anyhow::Result<Self> {
         let menu = Menu::new();
@@ -146,23 +141,32 @@ impl Tray {
         let open_dir = MenuItem::new("Open data folder", true, None);
         let quit = MenuItem::new("Quit", true, None);
 
-        // Radio behaviour by hand: `muda` has no radio item, and a check item per
-        // sheet with exactly one ticked reads the same way.
-        let dancers = Submenu::new("Dancer", true);
-        let mut sheet_items = Vec::with_capacity(sheets.len());
-        for (i, name) in sheets.iter().enumerate() {
-            let item = CheckMenuItem::new(name, true, Some(i) == current_sheet, None);
-            dancers.append(&item)?;
-            sheet_items.push(item);
+        // Which sheet a *new* dancer wears. Changing an existing dancer's sheet
+        // is that dancer's own business — its right-click menu — so nothing here
+        // is a radio list: these are verbs, one per sheet.
+        let add = Submenu::new("Add dancer", true);
+        let mut add_items = Vec::with_capacity(sheets.len());
+        for name in sheets {
+            let item = MenuItem::new(name, true, None);
+            add.append(&item)?;
+            add_items.push(item);
         }
         if sheets.is_empty() {
             // Never an empty submenu: an empty one looks broken, whereas a line
             // saying what is missing points at the fix.
-            dancers.append(&MenuItem::new("No sheets in the artwork folder", false, None))?;
+            add.append(&MenuItem::new("No sheets in the artwork folder", false, None))?;
         }
+        let add_random = MenuItem::new("Random", !sheets.is_empty(), None);
+        add.append_items(&[&PredefinedMenuItem::separator(), &add_random])?;
+
+        let remove_last = MenuItem::new("Remove last dancer", now.dancers > 1, None);
+
+        let dancers = Submenu::new("Dancers", true);
         let open_artwork = MenuItem::new("Open artwork folder", true, None);
         let sheet_help = MenuItem::new("How to add dancers...", true, None);
         dancers.append_items(&[
+            &add,
+            &remove_last,
             &PredefinedMenuItem::separator(),
             &open_artwork,
             &sheet_help,
@@ -175,22 +179,6 @@ impl Tray {
             let item = MenuItem::new(format!("Get {name}..."), true, None);
             dancers.append(&item)?;
             source_items.push(item);
-        }
-
-        // How many at once. Lives inside the Dancer submenu: it is the same
-        // subject, and top-level menus grow one line at a time until nobody can
-        // find anything.
-        let mut count_items = Vec::with_capacity(COUNTS.len());
-        dancers.append(&PredefinedMenuItem::separator())?;
-        for &n in COUNTS {
-            let text = if n == 1 {
-                "1 dancer".to_string()
-            } else {
-                format!("{n} dancers")
-            };
-            let item = CheckMenuItem::new(text, true, n == now.dancers, None);
-            dancers.append(&item)?;
-            count_items.push(item);
         }
 
         let yandex_item = MenuItem::new(&now.yandex, false, None);
@@ -206,11 +194,12 @@ impl Tray {
             plus_coarse: plus_coarse.id().clone(),
             reset_offset: reset_offset.id().clone(),
             open_dir: open_dir.id().clone(),
-            sheets: sheet_items.iter().map(|i| i.id().clone()).collect(),
+            add: add_items.iter().map(|i| i.id().clone()).collect(),
+            add_random: add_random.id().clone(),
+            remove_last: remove_last.id().clone(),
             open_artwork: open_artwork.id().clone(),
             sheet_help: sheet_help.id().clone(),
             sources: source_items.iter().map(|i| i.id().clone()).collect(),
-            counts: count_items.iter().map(|i| i.id().clone()).collect(),
             yandex_sign_in: yandex_sign_in.id().clone(),
             quit: quit.id().clone(),
         };
@@ -251,7 +240,7 @@ impl Tray {
             click_through: click_through_item,
             always_on_top: always_on_top_item,
             anticipate: anticipate_item,
-            counts: count_items,
+            remove_last,
             yandex: yandex_item,
             ids,
         })
@@ -289,12 +278,14 @@ impl Tray {
             Action::SheetHelp
         } else if *id == self.ids.yandex_sign_in {
             Action::YandexSignIn
-        } else if let Some(i) = self.ids.sheets.iter().position(|s| s == id) {
-            Action::SelectSheet(i)
+        } else if let Some(i) = self.ids.add.iter().position(|s| s == id) {
+            Action::AddDancer(Some(i))
+        } else if *id == self.ids.add_random {
+            Action::AddDancer(None)
+        } else if *id == self.ids.remove_last {
+            Action::RemoveLastDancer
         } else if let Some(i) = self.ids.sources.iter().position(|s| s == id) {
             Action::OpenSheetSource(i)
-        } else if let Some(i) = self.ids.counts.iter().position(|s| s == id) {
-            Action::SetDancerCount(COUNTS[i])
         } else if *id == self.ids.quit {
             Action::Quit
         } else {
@@ -317,9 +308,7 @@ impl Tray {
         self.click_through.set_checked(now.click_through);
         self.always_on_top.set_checked(now.always_on_top);
         self.anticipate.set_checked(now.anticipate);
-        for (item, &n) in self.counts.iter().zip(COUNTS) {
-            item.set_checked(n == now.dancers);
-        }
+        self.remove_last.set_enabled(now.dancers > 1);
     }
 }
 

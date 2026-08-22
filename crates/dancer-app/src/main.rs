@@ -883,6 +883,67 @@ impl App {
         )
     }
 
+    /// Where the next dancer of `size` goes: beside the ones already on screen,
+    /// wrapping to a new row at the monitor's edge, and never outside it.
+    ///
+    /// The first version cascaded to the right without looking at the monitor,
+    /// and three wide sheets in put the fourth dancer somewhere east of the
+    /// display — present, dancing, and impossible to see or click. Overlap is
+    /// the fallback when even the wrap runs out of room: a dancer on top of
+    /// another can be dragged apart; an invisible one cannot.
+    fn next_slot(&self, el: &ActiveEventLoop, size: (u32, u32)) -> (i32, i32) {
+        let placed: Vec<&dancer::Dancer> =
+            self.dancers.iter().filter(|d| d.window.is_some()).collect();
+        let Some(first) = placed.first() else {
+            return self.initial_position(el, size);
+        };
+
+        // The monitor dancer 0 is on, by its top-left; primary if that is nowhere.
+        let anchor = first.pos;
+        let mon = el
+            .available_monitors()
+            .find(|m| {
+                let (p, s) = (m.position(), m.size());
+                anchor.0 >= p.x
+                    && anchor.1 >= p.y
+                    && anchor.0 < p.x + s.width as i32
+                    && anchor.1 < p.y + s.height as i32
+            })
+            .or_else(|| el.primary_monitor());
+        let (mp, ms) = mon
+            .map(|m| (m.position(), m.size()))
+            .unwrap_or((PhysicalPosition::new(0, 0), PhysicalSize::new(1920, 1080)));
+        let (right, bottom) = (mp.x + ms.width as i32, mp.y + ms.height as i32);
+        let (w, h) = (size.0 as i32, size.1 as i32);
+        const GAP: i32 = 12;
+
+        // Next to the rightmost dancer in the current row -- the row of the
+        // dancer placed last, since that is the one being filled.
+        let row_top = placed.last().map_or(anchor.1, |d| d.pos.1);
+        let row: Vec<&&dancer::Dancer> = placed.iter().filter(|d| d.pos.1 == row_top).collect();
+        let row_right = row.iter().map(|d| d.pos.0 + d.surface_size().0 as i32).max().unwrap_or(anchor.0);
+        let row_height = row.iter().map(|d| d.surface_size().1 as i32).max().unwrap_or(h);
+
+        let mut x = row_right + GAP;
+        let mut y = row_top;
+        if x + w > right {
+            // Wrap to a fresh row from the monitor's left edge -- not the row's
+            // own left edge, which with dancer 0 parked at the right of the
+            // screen fits two per row and stacks the rest.
+            x = mp.x;
+            y = row_top + row_height + GAP;
+            if y + h > bottom {
+                // No room below: rows above the topmost one instead.
+                let top = placed.iter().map(|d| d.pos.1).min().unwrap_or(anchor.1);
+                y = top - h - GAP;
+            }
+        }
+        // Inside the monitor, whatever it takes.
+        x = x.clamp(mp.x, (right - w).max(mp.x));
+        y = y.clamp(mp.y, (bottom - h).max(mp.y));
+        (x, y)
+    }
+
     /// Convert the current absolute position back to (monitor, normalised x/y).
     ///
     /// Stored normalised so the position survives a resolution or DPI change
@@ -915,18 +976,12 @@ impl App {
         self.sheets = sheets::list(&self.artwork_dir());
         let art = self.artwork_dir();
         let names: Vec<String> = self.sheets.iter().map(|p| sheets::label_in(&art, p)).collect();
-        let current = self
-            .sheets
-            .iter()
-            .position(|p| *p == self.dancers[0].sheet_path);
-
         match tray::Tray::new(
             &cell,
             cell_w,
             cell_h,
             &self.tray_state(),
             &names,
-            current,
             &sheets::SOURCES.iter().map(|s| s.name).collect::<Vec<_>>(),
         ) {
             Ok(t) => {
@@ -1002,8 +1057,11 @@ impl App {
             tray::Action::OpenArtworkDir => dialog::open_dir(&self.artwork_dir()),
             tray::Action::SheetHelp => self.show_sheet_help(),
             tray::Action::OpenSheetSource(i) => open_sheet_source(i),
-            tray::Action::SelectSheet(i) => self.select_sheet(i),
-            tray::Action::SetDancerCount(n) => self.set_dancer_count(n, el),
+            tray::Action::AddDancer(which) => {
+                let path = which.and_then(|i| self.sheets.get(i).cloned());
+                self.spawn_dancer(path, None, el);
+            }
+            tray::Action::RemoveLastDancer => self.remove_dancer(self.dancers.len().saturating_sub(1)),
             tray::Action::YandexSignIn => {
                 self.account = account::Status::Checking;
                 account::sign_in(self.account_ch.tx.clone());
@@ -1041,6 +1099,18 @@ impl App {
                     tracing::warn!(error = %e, "could not save mirror");
                 }
             }
+            context::Action::SelectSheet(i) => {
+                if let Some(path) = self.sheets.get(i).cloned() {
+                    self.wear_sheet(dancer, path);
+                }
+            }
+            context::Action::Duplicate => {
+                if let Some(d) = self.dancers.get(dancer) {
+                    let (path, scale) = (d.sheet_path.clone(), d.scale);
+                    self.spawn_dancer(Some(path), Some(scale), el);
+                }
+            }
+            context::Action::Remove => self.remove_dancer(dancer),
             context::Action::Quit => self.quit(el),
         }
     }
@@ -1051,9 +1121,24 @@ impl App {
     /// `drain_menus` picks it up on the next pass, which winit runs immediately
     /// after this handler returns.
     fn show_context_menu(&mut self, dancer: usize) {
+        // Rescanned here, so a sheet dropped into the folder is offered on the
+        // next right-click rather than after a restart. `self.sheets` is also
+        // what the tray's Add submenu indexes into -- both are rebuilt from this
+        // one list, so their indices cannot disagree.
+        let art = self.artwork_dir();
+        self.sheets = sheets::list(&art);
+        let names: Vec<String> = self.sheets.iter().map(|p| sheets::label_in(&art, p)).collect();
+
         let Some(d) = self.dancers.get(dancer) else { return };
         let Some(hwnd) = d.hwnd else { return };
-        match context::Context::new(d.scale, self.cfg.sprite.mirror) {
+        let view = context::View {
+            scale: d.scale,
+            mirror: self.cfg.sprite.mirror,
+            sheets: &names,
+            current_sheet: self.sheets.iter().position(|p| *p == d.sheet_path),
+            removable: self.dancers.len() > 1,
+        };
+        match context::Context::new(&view) {
             Ok(ctx) => {
                 ctx.show(hwnd);
                 self.context = Some((dancer, ctx));
@@ -1072,92 +1157,130 @@ impl App {
         on
     }
 
-    /// Grow or shrink the troupe, live (tray: Dancer -> N dancers).
+    /// Add one dancer, live.
     ///
-    /// Shrinking drops dancers from the end -- dropping a `Dancer` drops its
-    /// window, which closes it. Growing follows the same rules as launch: sheets
-    /// from `[dancers] sheets` or at random from the artwork folder, size
-    /// jittered, a fresh scheduler seed each. A new dancer also *joins the song
-    /// in progress*: identity and grid are replayed to it from dancer 0, so it
-    /// starts dancing at the next position report instead of idling until the
-    /// next track change.
-    fn set_dancer_count(&mut self, n: usize, el: &ActiveEventLoop) {
-        let n = n.clamp(1, 16);
-        if n == self.dancers.len() {
+    /// `path` names its sheet; `None` draws from `[dancers] sheets` or at random
+    /// from the artwork folder, exactly as launch does. `scale` pins its size
+    /// (Duplicate); `None` jitters it like launch does. Either way it gets a
+    /// fresh scheduler seed, and it *joins the song in progress*: TrackChanged
+    /// and ScoreReady were broadcast once, before it existed, so they are
+    /// replayed from dancer 0 and the next position report locks its clock.
+    /// Without that, a dancer added mid-song would idle until the next track.
+    fn spawn_dancer(&mut self, path: Option<PathBuf>, scale: Option<f32>, el: &ActiveEventLoop) -> bool {
+        if self.dancers.len() >= 16 {
+            tracing::warn!("sixteen dancers is the ceiling");
+            return false;
+        }
+        let mut rng = XorShift::new(seed());
+        let i = self.dancers.len();
+
+        let path = path.or_else(|| {
+            let art = self.artwork_dir();
+            let pool = troupe_pool(&self.cfg, &art);
+            pick_pool_sheet(&self.cfg, &pool, i, &mut rng)
+        });
+        let (sheet_i, path_i) = match path.map(|p| (Sheet::load(&p), p)) {
+            Some((Ok(s), p)) => (s, p),
+            Some((Err(e), p)) => {
+                tracing::warn!(sheet = %p.display(), error = %e, "dancer sheet failed; using dancer 0's");
+                (self.dancers[0].sheet.clone(), self.dancers[0].sheet_path.clone())
+            }
+            None => (self.dancers[0].sheet.clone(), self.dancers[0].sheet_path.clone()),
+        };
+
+        let scale = scale.unwrap_or_else(|| {
+            let jitter = self.cfg.dancers.jitter();
+            let spread = if jitter > 0.0 {
+                1.0 + jitter * (rng.unit() * 2.0 - 1.0)
+            } else {
+                1.0
+            };
+            (self.cfg.sprite.scale * spread).clamp(0.1, 8.0)
+        });
+
+        let mut playback = Playback::new(
+            Instant::now(),
+            self.cfg.playback.offset_secs,
+            row_info(&sheet_i),
+            sheet_i.default_row,
+            rng.next(),
+        );
+        if !self.dancers[0].playback.anticipating() {
+            playback.toggle_anticipation();
+        }
+        if let Some(meta) = self.dancers[0].playback.track.clone() {
+            let id = meta.id.clone();
+            playback.apply(AppEvent::TrackChanged { id: id.clone(), meta });
+            if let Some(score) = self.dancers[0].playback.clock.score().cloned() {
+                playback.apply(AppEvent::ScoreReady { id, score });
+            }
+        }
+
+        let mut d = dancer::Dancer::new(sheet_i, path_i, playback, scale);
+        let pos = self.next_slot(el, d.surface_size());
+        tracing::info!(dancer = i, sheet = %d.sheet_path.display(), scale, pos = ?pos, "dancer joins");
+        if !d.create_window(el, &self.cfg, pos) {
+            return false;
+        }
+        self.dancers.push(d);
+        self.reset_watch_sheets();
+        self.persist_troupe();
+        true
+    }
+
+    /// Close dancer `i`. Dropping a `Dancer` drops its window, which closes it.
+    /// Never the last one: that is what Quit is for.
+    fn remove_dancer(&mut self, i: usize) {
+        if self.dancers.len() <= 1 || i >= self.dancers.len() {
             return;
         }
-
-        if n < self.dancers.len() {
-            self.dancers.truncate(n);
-        } else {
-            let mut rng = XorShift::new(seed());
-            let artwork = self.artwork_dir();
-            let pool = troupe_pool(&self.cfg, &artwork);
-            while self.dancers.len() < n {
-                let i = self.dancers.len();
-                let (sheet_i, path_i) = match pick_pool_sheet(&self.cfg, &pool, i, &mut rng)
-                    .map(|p| (Sheet::load(&p), p))
-                {
-                    Some((Ok(s), p)) => (s, p),
-                    Some((Err(e), p)) => {
-                        tracing::warn!(sheet = %p.display(), error = %e, "dancer sheet failed; using dancer 0's");
-                        (self.dancers[0].sheet.clone(), self.dancers[0].sheet_path.clone())
-                    }
-                    None => (self.dancers[0].sheet.clone(), self.dancers[0].sheet_path.clone()),
-                };
-
-                let jitter = self.cfg.dancers.jitter();
-                let spread = if jitter > 0.0 {
-                    1.0 + jitter * (rng.unit() * 2.0 - 1.0)
-                } else {
-                    1.0
-                };
-                let scale = (self.cfg.sprite.scale * spread).clamp(0.1, 8.0);
-
-                let mut playback = Playback::new(
-                    Instant::now(),
-                    self.cfg.playback.offset_secs,
-                    row_info(&sheet_i),
-                    sheet_i.default_row,
-                    rng.next(),
-                );
-                if !self.dancers[0].playback.anticipating() {
-                    playback.toggle_anticipation();
-                }
-                // Join the song in progress: TrackChanged and ScoreReady were
-                // broadcast once, before this dancer existed. Replay them from
-                // dancer 0; the next position report locks the clock.
-                if let Some(meta) = self.dancers[0].playback.track.clone() {
-                    let id = meta.id.clone();
-                    playback.apply(AppEvent::TrackChanged { id: id.clone(), meta });
-                    if let Some(score) = self.dancers[0].playback.clock.score().cloned() {
-                        playback.apply(AppEvent::ScoreReady { id, score });
-                    }
-                }
-
-                let mut d = dancer::Dancer::new(sheet_i, path_i, playback, scale);
-
-                // To the right of the rightmost dancer, at dancer 0's height.
-                let right = self
-                    .dancers
-                    .iter()
-                    .map(|d| d.pos.0 + d.surface_size().0 as i32)
-                    .max()
-                    .unwrap_or(0);
-                let pos = (right + 12, self.dancers[0].pos.1);
-                tracing::info!(dancer = i, sheet = %d.sheet_path.display(), scale, "dancer joins");
-                if !d.create_window(el, &self.cfg, pos) {
-                    break;
-                }
-                self.dancers.push(d);
-            }
-            self.reset_watch_sheets();
+        self.dancers.remove(i);
+        // The context menu's index, if it pointed past here, now names a
+        // different dancer or none; forget it rather than misdeliver a click.
+        self.context = None;
+        tracing::info!(dancer = i, left = self.dancers.len(), "dancer removed");
+        self.reset_watch_sheets();
+        self.persist_troupe();
+        if i == 0 {
+            // The icon is cut from dancer 0's sheet, and that is someone else now.
+            self.rebuild_tray();
         }
+    }
 
+    /// Put dancer `i` in a different sheet.
+    fn wear_sheet(&mut self, i: usize, path: PathBuf) {
+        let Some(d) = self.dancers.get_mut(i) else { return };
+        if d.sheet_path == path {
+            return;
+        }
+        d.sheet_path = path;
+        d.reload_sheet(&self.cfg);
+        self.reset_watch_sheets();
+        self.persist_troupe();
+        if i == 0 {
+            self.rebuild_tray();
+        }
+    }
+
+    /// Write the troupe as it stands into the config, so the next launch rebuilds
+    /// exactly this: count, and a sheet per dancer by name. Dancer 0 also lands in
+    /// `[sprite] sheet`, which is what a single-dancer config has always meant.
+    fn persist_troupe(&mut self) {
+        let art = self.artwork_dir();
+        // Relative when it sits in the artwork folder, so a config written here
+        // stays portable if the whole folder moves.
+        self.cfg.sprite.sheet = match self.dancers[0].sheet_path.strip_prefix(&art) {
+            Ok(r) => r.to_string_lossy().into_owned(),
+            Err(_) => self.dancers[0].sheet_path.to_string_lossy().into_owned(),
+        };
         self.cfg.dancers.count = self.dancers.len();
-        tracing::info!(dancers = self.dancers.len(), "troupe resized");
+        self.cfg.dancers.sheets = self
+            .dancers
+            .iter()
+            .map(|d| sheets::label_in(&art, &d.sheet_path))
+            .collect();
         if let Err(e) = self.cfg.save(&self.dir) {
-            tracing::warn!(error = %e, "could not save the dancer count");
+            tracing::warn!(error = %e, "could not save the troupe");
         }
     }
 
@@ -1293,36 +1416,6 @@ impl App {
     ///
     /// Written to the config immediately, because picking a dancer is a preference
     /// and not a session setting — the surprise would be it reverting on restart.
-    /// Switch the whole troupe to the sheet at this index of the tray's list.
-    ///
-    /// All dancers, deliberately: the tray is process-wide, and "which of the
-    /// five identical menu entries moves which dancer" is not a puzzle to hand
-    /// anyone. Per-dancer choice is what `[dancers] sheets` is for.
-    fn select_sheet(&mut self, index: usize) {
-        let Some(path) = self.sheets.get(index).cloned() else {
-            return;
-        };
-
-        // Relative when it sits in the artwork folder, so a config written here
-        // stays portable if the whole folder moves.
-        self.cfg.sprite.sheet = match path.strip_prefix(self.artwork_dir()) {
-            Ok(rel) => rel.to_string_lossy().into_owned(),
-            Err(_) => path.to_string_lossy().into_owned(),
-        };
-        for d in &mut self.dancers {
-            if d.sheet_path != path {
-                d.sheet_path = path.clone();
-                d.reload_sheet(&self.cfg);
-            }
-        }
-        self.reset_watch_sheets();
-        if let Err(e) = self.cfg.save(&self.dir) {
-            tracing::warn!(error = %e, "could not save the chosen sheet");
-        }
-        // The tick moves to the new sheet, and the icon is cut from it.
-        self.rebuild_tray();
-    }
-
     /// Re-point the artwork watch at the sheets the troupe is actually wearing.
     fn reset_watch_sheets(&mut self) {
         let paths: Vec<PathBuf> = self.dancers.iter().map(|d| d.sheet_path.clone()).collect();
@@ -1544,23 +1637,20 @@ impl ApplicationHandler for App {
             return;
         }
 
-        // Dancer 0 sits where the config remembers; the rest cascade to its right,
-        // one window-width apart, and stay wherever the user drags them. Only
-        // dancer 0's position is persisted -- the rest are placed relative to it
-        // on every launch, which survives monitor changes better than N saved
-        // positions that may refer to screens that no longer exist.
-        let size0 = self.dancers[0].surface_size();
-        let base = self.initial_position(el, size0);
-        let mut x = base.0;
+        // Dancer 0 sits where the config remembers; the rest flow beside it,
+        // wrapping at the monitor edge (`next_slot`), and stay wherever the user
+        // drags them. Only dancer 0's position is persisted -- the rest are
+        // placed relative to it on every launch, which survives monitor changes
+        // better than N saved positions that may refer to screens that no
+        // longer exist.
         for i in 0..self.dancers.len() {
-            let pos = (x, base.1);
             let (w, h) = self.dancers[i].surface_size();
+            let pos = self.next_slot(el, (w, h));
             let cfg = &self.cfg;
             if !self.dancers[i].create_window(el, cfg, pos) {
                 el.exit();
                 return;
             }
-            x += w as i32 + 12;
 
             tracing::info!(
                 dancer = i,

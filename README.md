@@ -50,27 +50,28 @@ is 469 ms, so leaving it untrimmed can put the dancer half a beat out.
 |---|---|
 | Left drag | move the dancer |
 | Middle click | toggle anticipation |
-| Right click | size, mirror, quit |
-| Tray | dancer, offset, click-through, always-on-top, Yandex sign-in |
+| Right click | this dancer's sheet, size, mirror; duplicate or remove it; quit |
+| Tray | add/remove dancers, offset, click-through, always-on-top, Yandex sign-in |
 
 If it ever stops following your music, `dancer-rs.log` beside the executable says
 what it saw: which media session it followed, whether the track was recognised,
 and every state change.
 
-Right-click any dancer to resize or mirror it in place. And one dancer is only
-the default:
+One dancer is only the default. Tray → Dancers → *Add dancer* picks a sheet (or
+*Random*) and a new dancer joins the song already playing; right-click any
+dancer to change its sheet, resize it, duplicate it, or remove it. What you build
+is saved, so the next launch rebuilds the same troupe:
 
 ```toml
 [dancers]
-count = 3            # a troupe
-sheets = []          # names per dancer; empty = random from the artwork folder
+count = 3
+sheets = ["flchan/Dance_Large", "polish-cow/PolishCow", "banana/Banana"]
 scale_jitter = 0.3   # each dancer sized at scale x (1 +/- 0.3), once per launch
 ```
 
 Every dancer follows the same beat grid but carries its own scheduler seed, so a
 troupe picks different moves on the same downbeat — dancing together, not
-copy-pasted. The count is also in the tray, under Dancer: new dancers join the
-song already playing.
+copy-pasted.
 
 ## What syncs, and what does not
 
