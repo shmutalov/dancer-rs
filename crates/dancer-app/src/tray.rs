@@ -1,7 +1,8 @@
 //! System tray icon and menu (spec §13, ROADMAP M5).
 //!
 //! Until now the only controls were mouse gestures on the sprite itself:
-//! right-click to quit, middle-click for the A/B. That is unusable for anyone who
+//! right-click for the sprite's own menu, middle-click for the A/B. That is
+//! unusable for anyone who
 //! has not read the source, and it breaks entirely with `click_through` on — the
 //! window ignores the mouse, so there is no way to quit at all. The tray is the
 //! first control surface that does not depend on hitting a sprite.
@@ -13,7 +14,7 @@
 //! glance *which sheet is loaded* — which starts to matter once artwork hot-reloads
 //! and there is more than one sheet to choose between.
 
-use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu};
+use tray_icon::menu::{CheckMenuItem, Menu, MenuId, MenuItem, PredefinedMenuItem, Submenu};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
 /// What the user asked for.
@@ -225,46 +226,46 @@ impl Tray {
     }
 
     /// Drain pending menu clicks. Call once per event-loop pass.
-    pub fn poll(&self) -> Vec<Action> {
-        let mut out = Vec::new();
-        while let Ok(ev) = MenuEvent::receiver().try_recv() {
-            let id = ev.id();
-            let action = if *id == self.ids.click_through {
-                Action::ToggleClickThrough
-            } else if *id == self.ids.always_on_top {
-                Action::ToggleAlwaysOnTop
-            } else if *id == self.ids.anticipate {
-                Action::ToggleAnticipation
-            } else if *id == self.ids.minus_coarse {
-                Action::NudgeOffset(-NUDGE_COARSE)
-            } else if *id == self.ids.minus_fine {
-                Action::NudgeOffset(-NUDGE_FINE)
-            } else if *id == self.ids.plus_fine {
-                Action::NudgeOffset(NUDGE_FINE)
-            } else if *id == self.ids.plus_coarse {
-                Action::NudgeOffset(NUDGE_COARSE)
-            } else if *id == self.ids.reset_offset {
-                Action::ResetOffset
-            } else if *id == self.ids.open_dir {
-                Action::OpenDataDir
-            } else if *id == self.ids.open_artwork {
-                Action::OpenArtworkDir
-            } else if *id == self.ids.sheet_help {
-                Action::SheetHelp
-            } else if *id == self.ids.yandex_sign_in {
-                Action::YandexSignIn
-            } else if let Some(i) = self.ids.sheets.iter().position(|s| s == id) {
-                Action::SelectSheet(i)
-            } else if let Some(i) = self.ids.sources.iter().position(|s| s == id) {
-                Action::OpenSheetSource(i)
-            } else if *id == self.ids.quit {
-                Action::Quit
-            } else {
-                continue;
-            };
-            out.push(action);
-        }
-        out
+    /// The tray action this menu id means, if it is one of ours.
+    ///
+    /// The `MenuEvent` channel is global to the process and shared with the
+    /// sprite's context menu, so nobody drains it privately any more — `main`
+    /// drains it once and asks each menu in turn. Claiming an id that is not ours
+    /// would hijack the other menu's click.
+    pub fn action_for(&self, id: &MenuId) -> Option<Action> {
+        Some(if *id == self.ids.click_through {
+            Action::ToggleClickThrough
+        } else if *id == self.ids.always_on_top {
+            Action::ToggleAlwaysOnTop
+        } else if *id == self.ids.anticipate {
+            Action::ToggleAnticipation
+        } else if *id == self.ids.minus_coarse {
+            Action::NudgeOffset(-NUDGE_COARSE)
+        } else if *id == self.ids.minus_fine {
+            Action::NudgeOffset(-NUDGE_FINE)
+        } else if *id == self.ids.plus_fine {
+            Action::NudgeOffset(NUDGE_FINE)
+        } else if *id == self.ids.plus_coarse {
+            Action::NudgeOffset(NUDGE_COARSE)
+        } else if *id == self.ids.reset_offset {
+            Action::ResetOffset
+        } else if *id == self.ids.open_dir {
+            Action::OpenDataDir
+        } else if *id == self.ids.open_artwork {
+            Action::OpenArtworkDir
+        } else if *id == self.ids.sheet_help {
+            Action::SheetHelp
+        } else if *id == self.ids.yandex_sign_in {
+            Action::YandexSignIn
+        } else if let Some(i) = self.ids.sheets.iter().position(|s| s == id) {
+            Action::SelectSheet(i)
+        } else if let Some(i) = self.ids.sources.iter().position(|s| s == id) {
+            Action::OpenSheetSource(i)
+        } else if *id == self.ids.quit {
+            Action::Quit
+        } else {
+            return None;
+        })
     }
 
     /// Push current state into the menu.

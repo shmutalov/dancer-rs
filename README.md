@@ -50,7 +50,7 @@ is 469 ms, so leaving it untrimmed can put the dancer half a beat out.
 |---|---|
 | Left drag | move the dancer |
 | Middle click | toggle anticipation |
-| Right click | quit |
+| Right click | size, mirror, quit |
 | Tray | dancer, offset, click-through, always-on-top, Yandex sign-in |
 
 If it ever stops following your music, `dancer-rs.log` beside the executable says

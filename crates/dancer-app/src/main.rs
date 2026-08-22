@@ -15,7 +15,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::Context;
+use anyhow::Context as _;
+use tray_icon::menu::MenuEvent;
 use crossbeam_channel::{Receiver, Sender};
 use dancer_render::{
     apply_window_styles, capture_owner, hwnd_of, present, primary_button_down, reassert_topmost,
@@ -37,6 +38,7 @@ mod account;
 mod cli;
 mod config;
 mod console;
+mod context;
 mod dialog;
 mod events;
 mod library;
@@ -258,6 +260,7 @@ fn main() -> anyhow::Result<()> {
         sheets: Vec::new(),
         account: account::Status::Off,
         account_ch: account::Channel::new(),
+        context: None,
     };
     event_loop.run_app(&mut app)?;
     Ok(())
@@ -727,6 +730,9 @@ struct App {
     account_ch: account::Channel,
     /// What the tray menu was last told, so it is only rewritten on change.
     tray_shown: Option<tray::State>,
+    /// The last right-click menu shown, kept so its ids stay matchable: the
+    /// selection arrives on the shared menu channel after the popup closes.
+    context: Option<context::Context>,
 }
 
 impl App {
@@ -818,62 +824,124 @@ impl App {
                 tracing::info!("tray ready");
                 self.tray = Some(t);
             }
-            Err(e) => tracing::warn!(error = %e, "no tray icon; right-click the sprite to quit"),
+            Err(e) => tracing::warn!(error = %e, "no tray icon; the sprite's right-click menu still quits"),
         }
     }
 
     /// Apply whatever the tray menu was clicked for, then refresh what it shows.
-    fn drain_tray(&mut self, el: &ActiveEventLoop) {
-        let Some(tray) = self.tray.as_ref() else {
-            return;
-        };
-        for action in tray.poll() {
-            tracing::info!(?action, "tray");
-            match action {
-                tray::Action::ToggleClickThrough => {
-                    self.cfg.window.click_through = !self.cfg.window.click_through;
-                    if let Some(hwnd) = self.hwnd {
-                        apply_window_styles(hwnd, self.cfg.window.click_through);
-                    }
-                    // With the mouse passing through, the sprite cannot be clicked
-                    // at all — the tray is now the only way back, which is exactly
-                    // why this option was unusable before there was one.
-                    if self.cfg.window.click_through {
-                        tracing::info!("click-through on; use the tray to turn it off");
-                    }
-                }
-                tray::Action::ToggleAlwaysOnTop => {
-                    self.cfg.window.always_on_top = !self.cfg.window.always_on_top;
-                    if let Some(w) = self.window.as_ref() {
-                        w.set_window_level(if self.cfg.window.always_on_top {
-                            WindowLevel::AlwaysOnTop
-                        } else {
-                            WindowLevel::Normal
-                        });
-                    }
-                }
-                tray::Action::ToggleAnticipation => {
-                    self.playback.toggle_anticipation();
-                }
-                tray::Action::NudgeOffset(by) => self.set_offset(self.cfg.playback.offset_secs + by),
-                tray::Action::ResetOffset => self.set_offset(config::Playback::default_offset()),
-                tray::Action::OpenDataDir => dialog::open_dir(&self.dir),
-                tray::Action::OpenArtworkDir => dialog::open_dir(&self.artwork_dir()),
-                tray::Action::SheetHelp => self.show_sheet_help(),
-                tray::Action::OpenSheetSource(i) => open_sheet_source(i),
-                tray::Action::SelectSheet(i) => self.select_sheet(i),
-                tray::Action::YandexSignIn => {
-                    self.account = account::Status::Checking;
-                    account::sign_in(self.account_ch.tx.clone());
-                    self.tray_shown = None;
-                }
-                tray::Action::Quit => {
-                    self.quit(el);
-                    return;
-                }
+    /// Drain the process-wide menu channel and dispatch each click to whichever
+    /// menu owns its id.
+    ///
+    /// One drain point on purpose: `MenuEvent::receiver()` is global, so a second
+    /// poller would steal clicks at random -- whichever ran first would eat the
+    /// other menu's events. The tray is asked first only because it existed first;
+    /// ids are unique, so the order cannot change the answer.
+    fn drain_menus(&mut self, el: &ActiveEventLoop) {
+        while let Ok(ev) = MenuEvent::receiver().try_recv() {
+            if let Some(action) = self.tray.as_ref().and_then(|t| t.action_for(ev.id())) {
+                tracing::info!(?action, "tray");
+                self.on_tray(action, el);
+            } else if let Some(action) = self.context.as_ref().and_then(|c| c.action_for(ev.id())) {
+                tracing::info!(?action, "context menu");
+                self.on_context(action, el);
+            }
+            if el.exiting() {
+                return;
             }
         }
         self.refresh_tray();
+    }
+
+    fn on_tray(&mut self, action: tray::Action, el: &ActiveEventLoop) {
+        match action {
+            tray::Action::ToggleClickThrough => {
+                self.cfg.window.click_through = !self.cfg.window.click_through;
+                if let Some(hwnd) = self.hwnd {
+                    apply_window_styles(hwnd, self.cfg.window.click_through);
+                }
+                // With the mouse passing through, the sprite cannot be clicked
+                // at all — the tray is now the only way back, which is exactly
+                // why this option was unusable before there was one.
+                if self.cfg.window.click_through {
+                    tracing::info!("click-through on; use the tray to turn it off");
+                }
+            }
+            tray::Action::ToggleAlwaysOnTop => {
+                self.cfg.window.always_on_top = !self.cfg.window.always_on_top;
+                if let Some(w) = self.window.as_ref() {
+                    w.set_window_level(if self.cfg.window.always_on_top {
+                        WindowLevel::AlwaysOnTop
+                    } else {
+                        WindowLevel::Normal
+                    });
+                }
+            }
+            tray::Action::ToggleAnticipation => {
+                self.playback.toggle_anticipation();
+            }
+            tray::Action::NudgeOffset(by) => self.set_offset(self.cfg.playback.offset_secs + by),
+            tray::Action::ResetOffset => self.set_offset(config::Playback::default_offset()),
+            tray::Action::OpenDataDir => dialog::open_dir(&self.dir),
+            tray::Action::OpenArtworkDir => dialog::open_dir(&self.artwork_dir()),
+            tray::Action::SheetHelp => self.show_sheet_help(),
+            tray::Action::OpenSheetSource(i) => open_sheet_source(i),
+            tray::Action::SelectSheet(i) => self.select_sheet(i),
+            tray::Action::YandexSignIn => {
+                self.account = account::Status::Checking;
+                account::sign_in(self.account_ch.tx.clone());
+                self.tray_shown = None;
+            }
+            tray::Action::Quit => {
+                self.quit(el);
+                return;
+            }
+        }
+    }
+
+    fn on_context(&mut self, action: context::Action, el: &ActiveEventLoop) {
+        match action {
+            context::Action::SetScale(s) => self.set_scale(s),
+            context::Action::ToggleMirror => {
+                self.cfg.sprite.mirror = !self.cfg.sprite.mirror;
+                self.draw();
+                if let Err(e) = self.cfg.save(&self.dir) {
+                    tracing::warn!(error = %e, "could not save mirror");
+                }
+            }
+            context::Action::Quit => self.quit(el),
+        }
+    }
+
+    /// Build the right-click menu as of right now and pop it at the cursor.
+    ///
+    /// Blocks until the menu closes; the selection lands on the menu channel and
+    /// `drain_menus` picks it up on the next pass, which winit runs immediately
+    /// after this handler returns.
+    fn show_context_menu(&mut self) {
+        let Some(hwnd) = self.hwnd else { return };
+        match context::Context::new(self.cfg.sprite.scale, self.cfg.sprite.mirror) {
+            Ok(ctx) => {
+                ctx.show(hwnd);
+                self.context = Some(ctx);
+            }
+            Err(e) => tracing::warn!(error = %e, "could not build the context menu"),
+        }
+    }
+
+    /// Set the sprite scale and persist it -- same contract as `set_offset`:
+    /// written through immediately, because it is chosen by eye and losing it to
+    /// a kill means choosing again.
+    fn set_scale(&mut self, scale: f32) {
+        let scale = scale.clamp(0.1, 8.0);
+        if (scale - self.cfg.sprite.scale).abs() < 1e-3 {
+            return;
+        }
+        self.cfg.sprite.scale = scale;
+        self.resize_surface();
+        tracing::info!(scale, "scale");
+        if let Err(e) = self.cfg.save(&self.dir) {
+            tracing::warn!(error = %e, "could not save the scale");
+        }
     }
 
     /// Move the output-latency offset (spec §9.2) and persist it.
@@ -1526,12 +1594,13 @@ impl ApplicationHandler for App {
                         let on = self.playback.toggle_anticipation();
                         tracing::info!(anticipate = on, "A/B toggle");
                     }
-                    // Kept alongside the tray rather than replaced by it. It is the
-                    // only exit that still works if the shell refuses a tray icon,
-                    // and by now it is muscle memory.
+                    // A menu, not quit. Right-click-quit was M0's only control
+                    // and a misclick away from data loss; Quit now lives inside
+                    // this menu, so the sprite alone still suffices when the shell
+                    // refuses a tray icon -- one deliberate step instead of zero.
                     (MouseButton::Right, ElementState::Pressed) => {
                         self.end_drag();
-                        self.quit(el);
+                        self.show_context_menu();
                     }
                     _ => {}
                 }
@@ -1544,7 +1613,7 @@ impl ApplicationHandler for App {
         self.drain_events();
         self.drain_watch();
         self.drain_account();
-        self.drain_tray(el);
+        self.drain_menus(el);
         if el.exiting() {
             return;
         }

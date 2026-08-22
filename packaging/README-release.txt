@@ -151,7 +151,7 @@ Controls
 
   Left drag        move the dancer
   Middle click     toggle anticipation (the A/B — try it on a chorus)
-  Right click      quit
+  Right click      menu: size, mirror, quit
   Tray menu        everything else
 
 If you turn on click-through, the sprite stops receiving the mouse entirely, so
